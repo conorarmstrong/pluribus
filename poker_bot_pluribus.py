@@ -5,6 +5,34 @@ from collections import defaultdict
 import random
 from enum import Enum
 
+# Utility function for robust action sampling
+def sample_from_distribution(actions: list, probs: list):
+    """Robust sampling that handles floating point issues"""
+    if not actions:
+        return None
+    
+    # Convert to numpy array
+    probs = np.array(probs, dtype=np.float64)
+    
+    # Handle all zeros
+    if probs.sum() == 0:
+        return actions[0] if actions else None
+    
+    # Normalize
+    probs = probs / probs.sum()
+    
+    # Use cumulative distribution for robust sampling
+    cumsum = np.cumsum(probs)
+    cumsum[-1] = 1.0  # Force last element to be exactly 1
+    
+    r = np.random.random()
+    for i, cs in enumerate(cumsum):
+        if r <= cs:
+            return actions[i]
+    
+    # Fallback (should never reach here)
+    return actions[-1]
+
 # Core Game Types
 class Action(Enum):
     FOLD = 0
@@ -115,6 +143,13 @@ class LinearMCCFR:
         if self._is_terminal(state):
             return self._evaluate(state, traverser)
         
+        # Skip if current player is not in the hand
+        if state.current_player not in state.players_in_hand:
+            # Move to next active player
+            state.current_player = self._next_active_player(state)
+            if state.current_player == -1:  # No active players
+                return self._evaluate(state, traverser)
+        
         if state.current_player != traverser:
             # Sample opponent action
             strategy = self._get_strategy(state)
@@ -159,14 +194,16 @@ class LinearMCCFR:
         # Regret matching
         normalizing_sum = 0
         for action in actions:
-            strategy[action] = max(0, self.regret_sum[info_set_str][action])
-            normalizing_sum += strategy[action]
+            positive_regret = max(0, self.regret_sum[info_set_str][action])
+            strategy[action] = positive_regret
+            normalizing_sum += positive_regret
         
         # Normalize or use uniform strategy
         if normalizing_sum > 0:
             for action in actions:
-                strategy[action] /= normalizing_sum
+                strategy[action] = strategy[action] / normalizing_sum
         else:
+            # Uniform strategy when no positive regrets
             uniform_prob = 1.0 / len(actions)
             for action in actions:
                 strategy[action] = uniform_prob
@@ -228,11 +265,20 @@ class LinearMCCFR:
         """Apply action to game state"""
         # Clone state and apply action
         # Simplified implementation
-        new_state = GameState(**state.__dict__.copy())
+        new_state = GameState(
+            pot=state.pot,
+            players_in_hand=state.players_in_hand.copy(),  # Copy the set
+            current_player=state.current_player,
+            board_cards=state.board_cards.copy(),
+            betting_round=state.betting_round,
+            last_bet=state.last_bet,
+            player_bets=state.player_bets.copy(),
+            player_chips=state.player_chips.copy()
+        )
         act_type, amount = action
         
         if act_type == Action.FOLD:
-            new_state.players_in_hand.remove(state.current_player)
+            new_state.players_in_hand.discard(state.current_player)  # Use discard to avoid KeyError
         elif act_type == Action.CALL:
             new_state.player_bets[state.current_player] = state.last_bet
             new_state.pot += state.last_bet
@@ -241,16 +287,46 @@ class LinearMCCFR:
             new_state.last_bet = amount
             new_state.pot += amount
         
-        # Move to next player
-        new_state.current_player = (state.current_player + 1) % 6
+        # Move to next active player
+        new_state.current_player = self._next_active_player(new_state)
         
         return new_state
+    
+    def _next_active_player(self, state: GameState) -> int:
+        """Find next active player in hand"""
+        if not state.players_in_hand:
+            return -1
+        
+        # Start from next position
+        pos = (state.current_player + 1) % 6
+        
+        # Find next player in hand
+        for _ in range(6):
+            if pos in state.players_in_hand:
+                return pos
+            pos = (pos + 1) % 6
+        
+        return -1  # No active players
     
     def _sample_action(self, strategy: Dict) -> Tuple[Action, int]:
         """Sample action from strategy"""
         actions = list(strategy.keys())
         probs = list(strategy.values())
-        return np.random.choice(actions, p=probs)
+        
+        # Handle empty or all-zero strategies
+        if not actions or sum(probs) == 0:
+            # Return a default action
+            return (Action.CALL, 0)
+        
+        # Normalize probabilities to ensure they sum to 1
+        probs = np.array(probs, dtype=np.float64)
+        probs = probs / probs.sum()
+        
+        # Fix any numerical issues
+        probs = probs / probs.sum()  # Double normalization for precision
+        
+        idx = np.random.choice(len(actions), p=probs)
+        return actions[idx]
     
     def _prune_negative_regrets(self):
         """Remove actions with very negative regret (optimization)"""
@@ -338,12 +414,16 @@ class DepthLimitedSearch:
         actions = list(strategy.keys())
         probs = list(strategy.values())
         
+        # Handle empty or all-zero strategies
+        if sum(probs) == 0:
+            return (Action.CALL, 0)
+        
         # Normalize probabilities
-        total = sum(probs)
-        if total > 0:
-            probs = [p/total for p in probs]
-        else:
-            probs = [1.0/len(actions)] * len(actions)
+        probs = np.array(probs, dtype=np.float64)
+        probs = probs / probs.sum()
+        
+        # Fix any numerical issues
+        probs = probs / probs.sum()  # Double normalization for precision
         
         idx = np.random.choice(len(actions), p=probs)
         return actions[idx]
@@ -408,12 +488,16 @@ class PluribusBot:
         actions = list(strategy.keys())
         probs = list(strategy.values())
         
-        # Normalize
-        total = sum(probs)
-        if total > 0:
-            probs = [p/total for p in probs]
-        else:
-            probs = [1.0/len(actions)] * len(actions)
+        # Handle empty or all-zero strategies
+        if sum(probs) == 0:
+            return (Action.CALL, 0)
+        
+        # Normalize probabilities
+        probs = np.array(probs, dtype=np.float64)
+        probs = probs / probs.sum()
+        
+        # Fix any numerical issues
+        probs = probs / probs.sum()  # Double normalization for precision
         
         idx = np.random.choice(len(actions), p=probs)
         return actions[idx]

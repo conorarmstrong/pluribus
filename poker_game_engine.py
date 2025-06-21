@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 import random
 from enum import Enum
 
-# Import from previous modules (in practice, these would be separate files)
-# from poker_bot_pluribus import PluribusBot, GameState, Action
-# from poker_bot_utils import HandEvaluator, card_to_string, string_to_card
+# Import from other modules
+from poker_bot_pluribus import PluribusBot, GameState, Action
+from poker_bot_utils import HandEvaluator, card_to_string, string_to_card
 
 class GamePhase(Enum):
     PREFLOP = 0
@@ -347,7 +347,9 @@ class TrainingHarness:
         # First, train blueprint if not already trained
         if self.bot.blueprint.iteration == 0:
             print("Training blueprint strategy...")
-            self.bot.train_blueprint(iterations=100000)
+            self.bot.train_blueprint(iterations=10000)  # Reduced for reasonable training time
+        else:
+            print(f"Using existing blueprint with {self.bot.blueprint.iteration} iterations")
         
         # Play hands for experience
         for hand_num in range(num_hands):
@@ -357,7 +359,7 @@ class TrainingHarness:
             self.game.play_hand(verbose=False)
             
             # Periodically save progress
-            if hand_num % 5000 == 0:
+            if hand_num % 5000 == 0 and hand_num > 0:
                 self.bot.save_blueprint(f"pluribus_checkpoint_{hand_num}.pkl")
         
         print("Training complete!")

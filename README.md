@@ -22,18 +22,32 @@ Python 3.8+
 numpy>=1.19.0
 ```
 
+### Required Files
+Ensure all these files are in the same directory:
+- `poker_bot_pluribus.py` - Core bot implementation
+- `poker_bot_utils.py` - Utility functions
+- `poker_game_engine.py` - Game engine
+- `train.py` - Training script (optional)
+- `play.py` - Interactive play script (optional)
+
 ### Setup
 ```bash
 # Clone or download the files
 git clone <repository>
 cd pluribus-poker-bot
 
-# Install dependencies
+# Install dependencies (choose one method)
+pip install -r requirements.txt
+# OR
 pip install numpy
+
+# Verify installation
+python test_installation.py
 
 # Optional: Create virtual environment
 python -m venv poker_env
 source poker_env/bin/activate  # On Windows: poker_env\Scripts\activate
+pip install -r requirements.txt
 ```
 
 ## File Structure
@@ -52,15 +66,33 @@ pluribus-poker-bot/
 │   ├── AdvancedAbstraction  # Sophisticated hand bucketing
 │   └── PerformanceTracker   # Track winnings in mbb/game
 │
-└── poker_game_engine.py     # Game implementation
-    ├── PokerGameEngine      # Texas Hold'em rules engine
-    ├── TrainingHarness      # Self-play training system
-    └── Player               # Player state management
+├── poker_game_engine.py     # Game implementation
+│   ├── PokerGameEngine      # Texas Hold'em rules engine
+│   ├── TrainingHarness      # Self-play training system
+│   └── Player               # Player state management
+│
+├── train.py                 # Training script
+├── play.py                  # Interactive play script
+├── test_installation.py     # Verify setup
+├── requirements.txt         # Python dependencies
+└── README.md               # This file
 ```
 
 ## Quick Start
 
-### Playing Against the Bot
+### Method 1: Using Provided Scripts (Recommended)
+
+```bash
+# Train the bot first (optional but recommended)
+python3 train.py
+
+# Play against the bot
+python3 play.py
+```
+
+### Method 2: Direct Python Usage
+
+#### Playing Against the Bot
 
 ```python
 from poker_game_engine import PokerGameEngine
@@ -72,7 +104,7 @@ game = PokerGameEngine(num_players=6)
 game.play_hand(verbose=True)
 ```
 
-### Training a New Bot
+#### Training a New Bot
 
 ```python
 from poker_bot_pluribus import PluribusBot
@@ -281,6 +313,11 @@ with Pool(4) as pool:
 ## Troubleshooting
 
 ### Common Issues
+
+**"Import Error: name 'Action' is not defined"**
+- Ensure all three Python files are in the same directory
+- The files must be named exactly: `poker_bot_pluribus.py`, `poker_bot_utils.py`, `poker_game_engine.py`
+- If modifying imports, ensure circular dependencies are avoided
 
 **"Bot plays too aggressively"**
 - Ensure sufficient training iterations (>1M)
