@@ -1,0 +1,19 @@
+=== Quick Test of Fixes ===
+
+Testing sample action fix...
+✓ Successfully sampled action: (<Action.RAISE: 2>, 200)
+
+Testing game state cloning...
+✓ Game state cloning works correctly
+
+Testing probability normalization...
+✓ Probability normalization works correctly
+
+Testing minimal training...
+Training blueprint strategy with 5 iterations...
+✗ Error: maximum recursion depth exceeded
+
+==============================
+Tests passed: 3/4
+
+❌ Some tests failed. Please check the errors above.

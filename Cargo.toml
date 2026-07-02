@@ -1,0 +1,20 @@
+[package]
+name = "pluribus"
+version = "0.1.0"
+edition = "2021"
+description = "Pluribus-style 6-max no-limit hold'em bot: Linear MCCFR blueprint + optional online subgame resolving"
+
+[dependencies]
+rand = { version = "0.9", features = ["small_rng"] }
+rayon = "1.10"
+dashmap = "6"
+ahash = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+indicatif = "0.17"
+toml = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
