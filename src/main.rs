@@ -5,6 +5,7 @@ mod cards;
 mod cfr;
 mod engine;
 mod eval;
+mod lbr;
 mod play;
 mod river;
 mod search;
@@ -99,6 +100,23 @@ enum Cmd {
         baseline: Baseline,
         #[arg(long, default_value_t = 6)]
         players: usize,
+        /// Duplicate mode: play each deal once per seat (hero rotating) and
+        /// average within the deal — large variance reduction, same estimand.
+        #[arg(long)]
+        duplicate: bool,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
+    /// Lower-bound the blueprint's exploitability with a Local Best Response
+    /// agent (Lisý & Bowling 2017): heads-up blind vs blind, other seats fold.
+    Lbr {
+        #[arg(long, default_value = "blueprint.bin")]
+        blueprint: String,
+        #[arg(long, default_value_t = 20_000)]
+        hands: u64,
+        /// Board completions sampled per equity estimate.
+        #[arg(long, default_value_t = 100)]
+        runouts: u32,
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
@@ -263,6 +281,7 @@ fn main() {
             hands,
             baseline,
             players,
+            duplicate,
             seed,
         } => {
             let policy = load_policy(&blueprint);
@@ -271,11 +290,18 @@ fn main() {
                 ..HandConfig::default()
             };
             println!(
-                "evaluating {} hands vs {:?} baselines ({}-max)...",
-                hands, baseline, players
+                "evaluating {} hands vs {:?} baselines ({}-max{})...",
+                hands,
+                baseline,
+                players,
+                if duplicate { ", duplicate deals" } else { "" }
             );
             let started = std::time::Instant::now();
-            let r = table::run_eval(&policy, &cfg, baseline, hands, seed);
+            let r = if duplicate {
+                table::run_eval_duplicate(&policy, &cfg, baseline, hands / players as u64, seed)
+            } else {
+                table::run_eval(&policy, &cfg, baseline, hands, seed)
+            };
             println!(
                 "winrate: {:+.1} mbb/hand (95% CI ±{:.1}) over {} hands in {:.1}s",
                 r.mbb_per_hand,
@@ -283,6 +309,33 @@ fn main() {
                 r.hands,
                 started.elapsed().as_secs_f64()
             );
+        }
+
+        Cmd::Lbr {
+            blueprint,
+            hands,
+            runouts,
+            seed,
+        } => {
+            let policy = load_policy(&blueprint);
+            let cfg = HandConfig {
+                num_players: policy.blueprint.num_players,
+                ..HandConfig::default()
+            };
+            println!(
+                "LBR probe: {hands} hands blind-vs-blind ({}-max game, {runouts} runouts)...",
+                cfg.num_players
+            );
+            let started = std::time::Instant::now();
+            let r = lbr::run_lbr(&policy, &cfg, hands, runouts, seed);
+            println!(
+                "LBR wins {:+.1} mbb/hand (95% CI ±{:.1}) over {} hands in {:.1}s",
+                r.mbb_per_hand,
+                r.ci95,
+                r.hands,
+                started.elapsed().as_secs_f64()
+            );
+            println!("(lower bound on the blueprint's exploitability; 0 = unexploited)");
         }
 
         Cmd::Inspect { blueprint } => {

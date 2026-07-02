@@ -646,8 +646,8 @@ mod tests {
         assert!(h.is_terminal());
         let u = h.utilities();
         assert_eq!(u[0], 500);
-        for p in 1..6 {
-            assert_eq!(u[p], -100);
+        for &x in &u[1..6] {
+            assert_eq!(x, -100);
         }
     }
 
@@ -666,8 +666,8 @@ mod tests {
         assert_eq!(h.board().len(), 5);
         let u = h.utilities();
         assert_eq!(u.iter().sum::<i64>(), 0);
-        for p in 0..6 {
-            assert!(u[p] >= -10_000);
+        for &x in &u[..6] {
+            assert!(x >= -10_000);
         }
     }
 

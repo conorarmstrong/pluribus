@@ -133,6 +133,40 @@ pub struct EvalResult {
     pub ci95: f64,
 }
 
+/// Play one hand: `policy` in seat `hero`, `baseline` everywhere else.
+/// Returns the hero's net chips in mbb.
+fn play_one(
+    policy: &Policy,
+    cfg: &HandConfig,
+    baseline: Baseline,
+    deck: [u8; 52],
+    button: usize,
+    hero: usize,
+    rng: &mut SmallRng,
+) -> f64 {
+    let mut table = Table::new(cfg, button, deck);
+    let mut guard = 0;
+    while !table.real.is_terminal() {
+        guard += 1;
+        assert!(guard < 500, "eval hand did not terminate");
+        let p = table.real.to_act();
+        let a = if p == hero {
+            policy.act_blueprint(&table.shadow, &table.hist, rng)
+        } else {
+            baseline_action(baseline, &table.shadow, &policy.abs, rng)
+        };
+        table.apply_abs(a, &policy.abs);
+    }
+    table.real.utilities()[hero] as f64 / cfg.bb as f64 * 1000.0
+}
+
+fn mean_ci(results: &[f64]) -> (f64, f64) {
+    let mean = results.iter().sum::<f64>() / results.len() as f64;
+    let var = results.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>()
+        / (results.len().saturating_sub(1)) as f64;
+    (mean, 1.96 * (var / results.len() as f64).sqrt())
+}
+
 /// Play `hands` hands of `policy` (one seat, rotating) against baselines in
 /// every other seat. Stacks reset each hand (as in the Pluribus experiment);
 /// button rotates. Returns winrate in mbb/hand with a 95% CI.
@@ -144,7 +178,6 @@ pub fn run_eval(
     seed: u64,
 ) -> EvalResult {
     let n = cfg.num_players;
-    let bb = cfg.bb as f64;
     let results: Vec<f64> = (0..hands)
         .into_par_iter()
         .map(|i| {
@@ -153,29 +186,52 @@ pub fn run_eval(
             let button = rng.random_range(0..n);
             let mut deck = fresh_deck();
             deck.shuffle(&mut rng);
-            let mut table = Table::new(cfg, button, deck);
-            let mut guard = 0;
-            while !table.real.is_terminal() {
-                guard += 1;
-                assert!(guard < 500, "eval hand did not terminate");
-                let p = table.real.to_act();
-                let a = if p == hero {
-                    policy.act_blueprint(&table.shadow, &table.hist, &mut rng)
-                } else {
-                    baseline_action(baseline, &table.shadow, &policy.abs, &mut rng)
-                };
-                table.apply_abs(a, &policy.abs);
-            }
-            table.real.utilities()[hero] as f64 / bb * 1000.0
+            play_one(policy, cfg, baseline, deck, button, hero, &mut rng)
         })
         .collect();
 
-    let mean = results.iter().sum::<f64>() / results.len() as f64;
-    let var = results.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>()
-        / (results.len().saturating_sub(1)) as f64;
-    let ci95 = 1.96 * (var / results.len() as f64).sqrt();
+    let (mean, ci95) = mean_ci(&results);
     EvalResult {
         hands,
+        mbb_per_hand: mean,
+        ci95,
+    }
+}
+
+/// Duplicate evaluation (ACPC-style variance reduction): each sampled deal
+/// (deck + button) is played `num_players` times with the hero rotated
+/// through every seat, and the deal's score is the mean over rotations —
+/// card luck largely cancels within a deal. The CI is computed over deals,
+/// which are independent, so it remains unbiased.
+pub fn run_eval_duplicate(
+    policy: &Policy,
+    cfg: &HandConfig,
+    baseline: Baseline,
+    deals: u64,
+    seed: u64,
+) -> EvalResult {
+    let n = cfg.num_players;
+    let results: Vec<f64> = (0..deals)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng = SmallRng::seed_from_u64(seed ^ i.wrapping_mul(0x2545_F491_4F6C_DD1D));
+            let button = rng.random_range(0..n);
+            let mut deck = fresh_deck();
+            deck.shuffle(&mut rng);
+            let mut sum = 0.0;
+            for hero in 0..n {
+                let mut hrng = SmallRng::seed_from_u64(
+                    seed ^ i.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (hero as u64) << 56,
+                );
+                sum += play_one(policy, cfg, baseline, deck, button, hero, &mut hrng);
+            }
+            sum / n as f64
+        })
+        .collect();
+
+    let (mean, ci95) = mean_ci(&results);
+    EvalResult {
+        hands: deals * n as u64,
         mbb_per_hand: mean,
         ci95,
     }
@@ -265,6 +321,30 @@ mod tests {
         assert_eq!(*t.hist.last().unwrap(), TOKEN_STREET_SEP);
         assert!(!t.real.folded(2));
         assert_eq!(t.real.street(), crate::engine::Street::Flop);
+    }
+
+    /// Duplicate evaluation kills card-luck variance. In the deterministic
+    /// caller-vs-caller matchup, every deal's rotation-average is exactly the
+    /// zero-sum total / n = 0, so the estimate and CI must both be ~0 — while
+    /// plain evaluation of the same matchup has a CI of hundreds of mbb.
+    #[test]
+    fn duplicate_eval_cancels_card_luck() {
+        let policy = empty_policy();
+        let cfg = HandConfig::default();
+        let dup = run_eval_duplicate(&policy, &cfg, Baseline::Caller, 300, 7);
+        assert_eq!(dup.hands, 1_800);
+        assert!(
+            dup.mbb_per_hand.abs() < 1e-9 && dup.ci95 < 1e-9,
+            "duplicate caller-vs-caller must be exactly 0, got {} ± {}",
+            dup.mbb_per_hand,
+            dup.ci95
+        );
+        let plain = run_eval(&policy, &cfg, Baseline::Caller, 1_800, 7);
+        assert!(
+            plain.ci95 > 50.0,
+            "plain eval should be noisy here, got ±{}",
+            plain.ci95
+        );
     }
 
     /// A calling-station policy against calling-station baselines is a
