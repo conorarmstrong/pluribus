@@ -23,9 +23,12 @@ cargo build --release
 # Play against the bots (you are seat 0); --search enables online resolving
 ./target/release/pluribus play --blueprint blueprint.bin --search
 
-# Measure winrate vs baseline opponents
+# Measure winrate vs baseline opponents (--aivat / --duplicate reduce variance)
 ./target/release/pluribus eval --blueprint blueprint.bin --hands 200000 --baseline random
-./target/release/pluribus eval --blueprint blueprint.bin --hands 200000 --baseline caller
+./target/release/pluribus eval --blueprint blueprint.bin --hands 100000 --baseline caller --aivat
+
+# Lower-bound the blueprint's exploitability with a Local Best Response probe
+./target/release/pluribus lbr --blueprint blueprint.bin --hands 20000
 
 # Replay the 10,000 hands the real Pluribus played (Science 2019) and
 # measure how often this blueprint agrees with its decisions
@@ -92,7 +95,26 @@ play.
 Plays the blueprint (one rotating seat) against baseline opponents in every
 other seat and reports the winrate in **mbb/hand** (milli-big-blinds per hand)
 with a 95% confidence interval. Baselines: `random` (uniform over the action
-menu), `caller` (always check/call).
+menu), `caller` (always check/call). Two variance-reduction modes:
+
+- `--duplicate` — ACPC-style duplicate deals: each sampled deal is played
+  once per seat with the hero rotated through all of them, scored by the
+  within-deal mean. Card luck partially cancels; the estimand is unchanged.
+- `--aivat` — **AIVAT** (Burch et al., AAAI 2018): adds zero-mean correction
+  terms at the hero's hole-card deal, every board reveal, and every
+  known-distribution decision, using an omniscient value function (hero
+  equity vs the opponents' actual hands × pot). Unbiased for *any* value
+  function; ours is exact on the river, which cancels all showdown luck.
+  Halves the CI at equal hands (≈4× fewer hands for equal precision).
+
+### `lbr`
+**Local Best Response** (Lisý & Bowling 2017): a lower bound on the
+blueprint's exploitability. The LBR agent knows the bot's exact policy — it
+tracks the bot's range with exact Bayes updates and greedily best-responds
+using fold equity plus showdown equity against the tracked range under a
+check/call-down assumption. Runs heads-up blind-vs-blind inside the
+blueprint's native game (other seats fold), alternating blind seats. Reports
+LBR's winnings in mbb/hand: 0 = unexploited by this probe.
 
 ### `benchmark`
 Replays all 10,000 hands the real Pluribus played in the Science 2019
@@ -128,7 +150,9 @@ src/
 ├── bot.rs          Table policy: blueprint lookup + range-tracked
 │                   depth-limited subgame resolving
 ├── table.rs        Real hand + abstract "shadow" hand + history tracking;
-│                   off-tree bet mapping; eval harness (mbb/hand ± CI)
+│                   off-tree bet mapping; eval harness (plain + duplicate)
+├── aivat.rs        AIVAT variance-reduced unbiased winrate estimator
+├── lbr.rs          Local Best Response exploitability lower bound
 ├── benchmark.rs    PHH parser + replay vs the real Pluribus's 10,000 hands
 ├── play.rs         Interactive terminal game (feeds the range tracker)
 └── main.rs         CLI (clap)
@@ -168,7 +192,7 @@ tracked ranges (see `play` above).
 
 ## Correctness
 
-The project is TDD-built with 60 tests:
+The project is TDD-built with 68 tests:
 
 - evaluator: category spot checks, ordering checks, and a 30k-hand
   differential test against an independent naive evaluator
@@ -199,6 +223,13 @@ The project is TDD-built with 60 tests:
   full dataset reproduce their logged finishing stacks exactly)
 - table: shadow/real consistency under fuzz, off-tree bet mapping, and a
   symmetric-matchup eval that must come out statistically at zero
+- evaluation science: duplicate deals of the deterministic caller-vs-caller
+  matchup must score exactly 0 ± 0 (zero-sum cancellation) while plain
+  evaluation is noisy; AIVAT must agree with the plain estimator on the mean
+  and cut the CI by more than half; the AIVAT value function is exact at
+  river states; LBR calls a shove with the nuts, folds air, exactly zeroes
+  non-raising hands from an observed raiser's range, and crushes a calling
+  station by four figures
 
 Run them with `cargo test`.
 
@@ -208,7 +239,12 @@ Blueprint: 12 EMD k-means buckets/street, full bet menus, 128.5M infosets
 (101M exported strategies, 4.3GB), trained in 79 minutes on 16 cores.
 
 - **vs baselines** (200k hands each): +4426 ±334 mbb/hand vs random,
-  +3735 ±371 vs always-call.
+  +3735 ±371 vs always-call. AIVAT agrees with half the CI at half the
+  hands: +4285 ±273 vs random, +3704 ±260 vs always-call (100k hands).
+- **exploitability lower bound** (LBR, 20k hands blind-vs-blind): the raw
+  blueprint without search is exploitable by at least **+366 ±322
+  mbb/hand** — the expected picture for an abstraction-level blueprint,
+  and the reason Pluribus (and this bot) add real-time search on top.
 - **vs the real Pluribus** (all 10,000 logged hands, 15,169 decisions,
   99.0% covered): our blueprint picks Pluribus's exact action as its own
   top choice **66.8%** of the time overall (75.6% preflop, ~45-50%
@@ -257,6 +293,11 @@ Blueprint: 12 EMD k-means buckets/street, full bet menus, 128.5M infosets
   solver's range-vector formulation)
 - McKelvey & Palfrey, "Quantal Response Equilibria for Normal Form Games",
   GEB 1995
+- Lisý & Bowling, "Equilibrium Approximation Quality of Current No-Limit
+  Poker Bots", AAAI-17 Workshop (Local Best Response)
+- Burch, Schmid, Moravčík, Morrill & Bowling, "AIVAT: A New Variance
+  Reduction Technique for Agent Evaluation in Imperfect Information Games",
+  AAAI 2018
 - Ganzfried & Sandholm, "Potential-Aware Imperfect-Recall Abstraction with
   Earth Mover's Distance in Imperfect-Information Games", AAAI 2014
 - uoftcprg/phh-dataset — Poker Hand History format; the 10,000 Pluribus

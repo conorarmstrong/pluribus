@@ -1,4 +1,5 @@
 mod abstraction;
+mod aivat;
 mod benchmark;
 mod bot;
 mod cards;
@@ -104,6 +105,10 @@ enum Cmd {
         /// average within the deal — large variance reduction, same estimand.
         #[arg(long)]
         duplicate: bool,
+        /// AIVAT mode: unbiased estimator with chance/decision correction
+        /// terms (Burch et al. 2018) — strongest variance reduction.
+        #[arg(long)]
+        aivat: bool,
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
@@ -282,6 +287,7 @@ fn main() {
             baseline,
             players,
             duplicate,
+            aivat,
             seed,
         } => {
             let policy = load_policy(&blueprint);
@@ -294,10 +300,18 @@ fn main() {
                 hands,
                 baseline,
                 players,
-                if duplicate { ", duplicate deals" } else { "" }
+                if aivat {
+                    ", AIVAT"
+                } else if duplicate {
+                    ", duplicate deals"
+                } else {
+                    ""
+                }
             );
             let started = std::time::Instant::now();
-            let r = if duplicate {
+            let r = if aivat {
+                aivat::run_eval_aivat(&policy, &cfg, baseline, hands, seed)
+            } else if duplicate {
                 table::run_eval_duplicate(&policy, &cfg, baseline, hands / players as u64, seed)
             } else {
                 table::run_eval(&policy, &cfg, baseline, hands, seed)

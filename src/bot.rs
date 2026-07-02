@@ -48,11 +48,10 @@ impl Policy {
         }
     }
 
-    /// Pick an abstract action for the player to act on `h` from the
-    /// blueprint. `hist` is the abstract action history (tokens).
-    /// Falls back to check/call on infosets the blueprint never visited or
-    /// whose action menu no longer matches.
-    pub fn act_blueprint(&self, h: &Hand, hist: &[u8], rng: &mut SmallRng) -> AbsAction {
+    /// The blueprint's full action distribution at the current infoset —
+    /// exactly what `act_blueprint` samples from, including its check/call
+    /// fallback on unseen or mismatched infosets.
+    pub fn blueprint_dist(&self, h: &Hand, hist: &[u8], rng: &mut SmallRng) -> (Vec<AbsAction>, Vec<f64>) {
         let p = h.to_act();
         let acts = self.abs.abstract_actions(h);
         let bucket = self.abs.bucket(h.hole(p), h.board(), rng);
@@ -62,11 +61,26 @@ impl Policy {
                 let total: f64 = probs.iter().sum();
                 if total > 0.0 {
                     let norm: Vec<f64> = probs.iter().map(|x| x / total).collect();
-                    return acts[sample_index(&norm, rng)];
+                    return (acts, norm);
                 }
             }
         }
-        AbsAction::CheckCall
+        let mut probs = vec![0.0; acts.len()];
+        let call = acts
+            .iter()
+            .position(|&a| a == AbsAction::CheckCall)
+            .expect("check/call is always legal");
+        probs[call] = 1.0;
+        (acts, probs)
+    }
+
+    /// Pick an abstract action for the player to act on `h` from the
+    /// blueprint. `hist` is the abstract action history (tokens).
+    /// Falls back to check/call on infosets the blueprint never visited or
+    /// whose action menu no longer matches.
+    pub fn act_blueprint(&self, h: &Hand, hist: &[u8], rng: &mut SmallRng) -> AbsAction {
+        let (acts, probs) = self.blueprint_dist(h, hist, rng);
+        acts[sample_index(&probs, rng)]
     }
 
     /// Resolve the current subgame with MCCFR for a time/iteration budget and

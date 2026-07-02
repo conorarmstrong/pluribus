@@ -31,8 +31,9 @@ impl Table {
         }
     }
 
-    /// Apply a bot-chosen abstract action to both hands.
-    pub fn apply_abs(&mut self, a: AbsAction, abs: &Abstraction) {
+    /// Apply a bot-chosen abstract action to both hands. Returns the concrete
+    /// action applied to the real hand (used by AIVAT replay).
+    pub fn apply_abs(&mut self, a: AbsAction, abs: &Abstraction) -> PlayerAction {
         let street_before = self.shadow.street();
         let shadow_act = abs.concrete(&self.shadow, a);
         self.shadow.apply(shadow_act);
@@ -42,6 +43,7 @@ impl Table {
         self.real.apply(real_act);
         self.push_token(a, self.shadow.street() != street_before);
         self.resync_if_diverged();
+        real_act
     }
 
     /// The abstract action the shadow hand will follow for a concrete
