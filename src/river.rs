@@ -346,50 +346,16 @@ impl RiverSolver {
         matched: f64,
         dead: f64,
     ) -> Vec<f64> {
-        let win_v = matched + dead;
-        let tie_v = dead / 2.0;
-        let lose_v = -matched;
-
-        let mut vals = vec![0.0; NUM_COMBOS];
-        let mut below_total = 0.0f64;
-        let mut below_card = [0.0f64; 52];
-
-        let mut i = 0;
-        while i < self.sorted.len() {
-            // Group of equal rank.
-            let r = self.rank[self.sorted[i] as usize];
-            let mut j = i;
-            let mut grp_total = 0.0f64;
-            let mut grp_card = [0.0f64; 52];
-            while j < self.sorted.len() && self.rank[self.sorted[j] as usize] == r {
-                let ci = self.sorted[j] as usize;
-                let w = reach_opp[ci];
-                if w > 0.0 {
-                    grp_total += w;
-                    let c = self.combos[ci];
-                    grp_card[c[0] as usize] += w;
-                    grp_card[c[1] as usize] += w;
-                }
-                j += 1;
-            }
-            for k in i..j {
-                let ci = self.sorted[k] as usize;
-                let c = self.combos[ci];
-                let (c0, c1) = (c[0] as usize, c[1] as usize);
-                // Opponent combos not sharing a card with ours:
-                let valid_total = total - card[c0] - card[c1] + reach_opp[ci];
-                let weaker = below_total - below_card[c0] - below_card[c1];
-                let tie = grp_total - grp_card[c0] - grp_card[c1] + reach_opp[ci];
-                let stronger = valid_total - weaker - tie;
-                vals[ci] = weaker * win_v + tie * tie_v + stronger * lose_v;
-            }
-            below_total += grp_total;
-            for c in 0..52 {
-                below_card[c] += grp_card[c];
-            }
-            i = j;
-        }
-        vals
+        showdown_sweep(
+            &self.combos,
+            &self.sorted,
+            &self.rank,
+            reach_opp,
+            total,
+            card,
+            matched,
+            dead,
+        )
     }
 
     #[cfg(test)]
@@ -426,6 +392,67 @@ impl RiverSolver {
         }
         vals
     }
+}
+
+/// O(N) sorted-sweep showdown evaluation with exact card-removal blocker
+/// effects via inclusion-exclusion — shared by the river and turn solvers.
+/// `sorted` lists valid combo indices ascending by `rank`; `total`/`card`
+/// aggregate `reach_opp` overall and per card.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn showdown_sweep(
+    combos: &[[Card; 2]],
+    sorted: &[u32],
+    rank: &[u32],
+    reach_opp: &[f64],
+    total: f64,
+    card: &[f64; 52],
+    matched: f64,
+    dead: f64,
+) -> Vec<f64> {
+    let win_v = matched + dead;
+    let tie_v = dead / 2.0;
+    let lose_v = -matched;
+
+    let mut vals = vec![0.0; NUM_COMBOS];
+    let mut below_total = 0.0f64;
+    let mut below_card = [0.0f64; 52];
+
+    let mut i = 0;
+    while i < sorted.len() {
+        // Group of equal rank.
+        let r = rank[sorted[i] as usize];
+        let mut j = i;
+        let mut grp_total = 0.0f64;
+        let mut grp_card = [0.0f64; 52];
+        while j < sorted.len() && rank[sorted[j] as usize] == r {
+            let ci = sorted[j] as usize;
+            let w = reach_opp[ci];
+            if w > 0.0 {
+                grp_total += w;
+                let c = combos[ci];
+                grp_card[c[0] as usize] += w;
+                grp_card[c[1] as usize] += w;
+            }
+            j += 1;
+        }
+        for k in i..j {
+            let ci = sorted[k] as usize;
+            let c = combos[ci];
+            let (c0, c1) = (c[0] as usize, c[1] as usize);
+            // Opponent combos not sharing a card with ours:
+            let valid_total = total - card[c0] - card[c1] + reach_opp[ci];
+            let weaker = below_total - below_card[c0] - below_card[c1];
+            let tie = grp_total - grp_card[c0] - grp_card[c1] + reach_opp[ci];
+            let stronger = valid_total - weaker - tie;
+            vals[ci] = weaker * win_v + tie * tie_v + stronger * lose_v;
+        }
+        below_total += grp_total;
+        for c in 0..52 {
+            below_card[c] += grp_card[c];
+        }
+        i = j;
+    }
+    vals
 }
 
 // ---------------------------------------------------------------------------

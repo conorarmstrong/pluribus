@@ -11,6 +11,7 @@ mod play;
 mod river;
 mod search;
 mod table;
+mod turn;
 
 use abstraction::{AbsConfig, Abstraction, Centroids};
 use bot::{Policy, SearchParams};
