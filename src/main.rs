@@ -6,6 +6,7 @@ mod bot;
 mod br;
 mod cards;
 mod cfr;
+mod distill;
 mod engine;
 mod eval;
 mod flop;
@@ -246,6 +247,33 @@ enum Cmd {
         lr: f32,
         #[arg(long, default_value_t = 128)]
         batch: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
+    /// Expert-iteration distillation: self-play with online search, then
+    /// blend the resolved distributions back into the blueprint (the
+    /// flywheel). Evaluate the output with br/crossplay/eval before use.
+    Distill {
+        #[arg(long, default_value = "blueprint.bin")]
+        blueprint: String,
+        #[arg(long, default_value = "distilled.bin")]
+        out: String,
+        /// Self-play hands (every seat searches).
+        #[arg(long, default_value_t = 20_000)]
+        hands: u64,
+        /// Per-decision search budget in milliseconds.
+        #[arg(long, default_value_t = 200)]
+        search_ms: u64,
+        /// Blend weight toward the search distribution (0 = no change,
+        /// 1 = replace outright at recorded infosets).
+        #[arg(long, default_value_t = 0.5)]
+        alpha: f64,
+        /// Belief-state value net for ReBeL flop solving during self-play.
+        #[arg(long)]
+        value_net: Option<String>,
+        /// Gadget-safe resolves during self-play (slower).
+        #[arg(long)]
+        safe_resolve: bool,
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
@@ -691,6 +719,58 @@ fn main() {
                 "value net saved to {out} (final val loss {val_loss:.5}, {:.0}s)",
                 started.elapsed().as_secs_f64()
             );
+        }
+
+        Cmd::Distill {
+            blueprint,
+            out,
+            hands,
+            search_ms,
+            alpha,
+            value_net,
+            safe_resolve,
+            seed,
+        } => {
+            let net = value_net.map(|p| {
+                let n = valuenet::ValueNet::load(&p)
+                    .unwrap_or_else(|e| die(&format!("cannot load value net '{p}': {e}")));
+                println!("loaded value net from {p}");
+                Arc::new(n)
+            });
+            let policy = load_policy(&blueprint).with_value_net(net);
+            let cfg = HandConfig {
+                num_players: policy.blueprint.num_players,
+                ..HandConfig::default()
+            };
+            let dcfg = distill::DistillCfg {
+                hands,
+                params: SearchParams {
+                    time_ms: search_ms,
+                    safe_resolve,
+                    ..SearchParams::default()
+                },
+                alpha,
+                seed,
+            };
+            println!(
+                "distilling: {hands} self-play hands ({}-max, {search_ms}ms/decision, alpha {alpha})...",
+                cfg.num_players
+            );
+            let started = std::time::Instant::now();
+            let (records, samples) = distill::collect(&policy, &cfg, &dcfg);
+            println!(
+                "collected {samples} searched decisions at {} infosets in {:.1}s",
+                records.len(),
+                started.elapsed().as_secs_f64()
+            );
+            let (bp2, updated) = distill::merge(&policy.blueprint, &records, alpha);
+            bp2.save(&out)
+                .unwrap_or_else(|e| die(&format!("save failed: {e}")));
+            println!(
+                "updated {updated} infosets; distilled blueprint saved to {out} ({} strategies)",
+                bp2.strategies.len()
+            );
+            println!("gate it: br/lbr, crossplay --focal {out} --field {blueprint}, eval");
         }
 
         Cmd::Crossplay {

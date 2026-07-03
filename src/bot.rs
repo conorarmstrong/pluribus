@@ -179,19 +179,40 @@ impl Policy {
         params: SearchParams,
         train_cfg: &TrainConfig,
         tracker: Option<&RangeTracker>,
-        mut session: Option<&mut SearchSession>,
+        session: Option<&mut SearchSession>,
         rng: &mut SmallRng,
     ) -> AbsAction {
+        let (acts, probs) =
+            self.search_dist(real, shadow, hist, params, train_cfg, tracker, session, rng);
+        acts[sample_index(&probs, rng)]
+    }
+
+    /// The full action distribution the search would act from — the routing
+    /// behind `act_with_search`, exposed for distillation (the resolved
+    /// distribution is the teacher signal, not just a sampled action).
+    /// Falls back to the blueprint distribution when no solver claims the
+    /// spot.
+    pub fn search_dist(
+        &self,
+        real: &Hand,
+        shadow: &Hand,
+        hist: &[u8],
+        params: SearchParams,
+        train_cfg: &TrainConfig,
+        tracker: Option<&RangeTracker>,
+        mut session: Option<&mut SearchSession>,
+        rng: &mut SmallRng,
+    ) -> (Vec<AbsAction>, Vec<f64>) {
         if real.street() == Street::Preflop {
-            return self.act_blueprint(shadow, hist, rng);
+            return self.blueprint_dist(shadow, hist, rng);
         }
         // River spots with two live players: exact range-vs-range CFR+
         // (river.rs) instead of sampled MCCFR.
         if real.street() == Street::River && real.live_count() == 2 {
             if let Some(tr) = tracker {
                 let sess = session.as_deref();
-                if let Some(a) = self.act_river_exact(real, hist, tr, params, sess, rng) {
-                    return a;
+                if let Some(d) = self.river_dist(real, hist, tr, params, sess, rng) {
+                    return d;
                 }
             }
         }
@@ -202,8 +223,8 @@ impl Policy {
         if real.street() == Street::Turn && real.live_count() == 2 {
             if let Some(tr) = tracker {
                 let sess = session.as_deref_mut();
-                if let Some(a) = self.act_turn_exact(real, hist, tr, params, sess, rng) {
-                    return a;
+                if let Some(d) = self.turn_dist(real, hist, tr, params, sess, rng) {
+                    return d;
                 }
             }
         }
@@ -211,8 +232,8 @@ impl Policy {
         // depth-limited vector solving with learned leaf values.
         if real.street() == Street::Flop && real.live_count() == 2 {
             if let (Some(tr), Some(net)) = (tracker, &self.value_net) {
-                if let Some(a) = self.act_flop_net(real, tr, net, params, rng) {
-                    return a;
+                if let Some(d) = self.flop_net_dist(real, tr, net, params, rng) {
+                    return d;
                 }
             }
         }
@@ -226,23 +247,23 @@ impl Policy {
         if let Some(s) = solver.avg_strategy(bucket, hist) {
             let acts = solver.abs.abstract_actions(real);
             if s.len() == acts.len() {
-                return acts[sample_index(&s, rng)];
+                return (acts, s);
             }
         }
-        self.act_blueprint(shadow, hist, rng)
+        self.blueprint_dist(shadow, hist, rng)
     }
 
     /// Depth-limited flop resolve over both players' tracked ranges with
     /// value-net leaves. None when the spot doesn't qualify or the hero's
     /// combo got no strategy weight (caller falls back to MCCFR search).
-    fn act_flop_net(
+    fn flop_net_dist(
         &self,
         h: &Hand,
         tracker: &RangeTracker,
         net: &Arc<ValueNet>,
         params: SearchParams,
-        rng: &mut SmallRng,
-    ) -> Option<AbsAction> {
+        _rng: &mut SmallRng,
+    ) -> Option<(Vec<AbsAction>, Vec<f64>)> {
         let hero = h.to_act();
         let villain = (0..h.num_players()).find(|&p| p != hero && !h.folded(p))?;
         let net_ref: &ValueNet = net;
@@ -260,8 +281,7 @@ impl Policy {
         } else {
             solver.solve(10_000, params.time_ms);
         }
-        let (acts, s) = solver.root_strategy(h.hole(hero))?;
-        Some(acts[sample_index(&s, rng)])
+        Some(solver.root_strategy(h.hole(hero))?)
     }
 
     /// Exact turn+river resolve over both players' tracked ranges (vector
@@ -269,7 +289,7 @@ impl Policy {
     /// sized). With `safe_resolve`, runs inside the Burch gadget using
     /// rollout-estimated safety values. None when the spot doesn't qualify
     /// (caller falls back to sampled MCCFR).
-    fn act_turn_exact(
+    fn turn_dist(
         &self,
         h: &Hand,
         hist: &[u8],
@@ -277,7 +297,7 @@ impl Policy {
         params: SearchParams,
         session: Option<&mut SearchSession>,
         rng: &mut SmallRng,
-    ) -> Option<AbsAction> {
+    ) -> Option<(Vec<AbsAction>, Vec<f64>)> {
         let hero = h.to_act();
         let villain = (0..h.num_players()).find(|&p| p != hero && !h.folded(p))?;
         let mut solver = crate::turn::TurnSolver::build(
@@ -291,12 +311,12 @@ impl Policy {
             solver = solver.with_gadget(alt);
         }
         solver.solve(200, params.time_ms);
-        let (acts, s) = solver.root_strategy(h.hole(hero))?;
+        let dist = solver.root_strategy(h.hole(hero))?;
         if let Some(sess) = session {
             sess.carry = Some(solver.extract_carry());
             sess.root_hist_len = hist.len();
         }
-        Some(acts[sample_index(&s, rng)])
+        Some(dist)
     }
 
     /// Exact river resolve over both players' tracked ranges. None when the
@@ -304,7 +324,7 @@ impl Policy {
     /// which case the caller falls back to sampled MCCFR. With
     /// `safe_resolve`, the solve runs the Burch resolving gadget using
     /// rollout-estimated blueprint safety values for the opponent.
-    fn act_river_exact(
+    fn river_dist(
         &self,
         h: &Hand,
         hist: &[u8],
@@ -312,7 +332,7 @@ impl Policy {
         params: SearchParams,
         session: Option<&SearchSession>,
         rng: &mut SmallRng,
-    ) -> Option<AbsAction> {
+    ) -> Option<(Vec<AbsAction>, Vec<f64>)> {
         let hero = h.to_act();
         let villain = (0..h.num_players()).find(|&p| p != hero && !h.folded(p))?;
         let mut solver = crate::river::RiverSolver::build(
@@ -340,8 +360,7 @@ impl Policy {
         } else {
             solver.solve(10_000, params.time_ms, params.qre_lambda);
         }
-        let (acts, s) = solver.root_strategy(h.hole(hero))?;
-        Some(acts[sample_index(&s, rng)])
+        Some(solver.root_strategy(h.hole(hero))?)
     }
 
     /// Rollout-estimated safety values for the opponent: for each of its
