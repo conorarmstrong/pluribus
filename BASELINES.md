@@ -185,3 +185,28 @@ gens' +1300 was entirely the menu bug, and no purity damage is visible
 at α=0.1. Head-to-head is positive but underpowered at this coverage.
 gen1d queued as the definitive test: 50k hands, α=0.5, 1M-hand
 crossplay (±60 CI).
+
+### gen1d (definitive): policy distillation is safe and WORTHLESS —
+### Phase 2 policy branch closed
+
+- `distill --hands 50000 --search-ms 800 --alpha 0.5 --value-net
+  value_net.bin --seed 1` → 80,097 decisions, 33,373 infosets, 0
+  mismatches, 73 min
+
+| Gate | Result | Reference |
+|------|--------|-----------|
+| BR probe (`--hands 20000 --seed 1`) | +484.5 ±328.5 | gen0: +475.4 ±320.6 |
+| Crossplay vs gen0, **1M hands** | **−38.5 ±62.0** | — |
+
+Verdict: at 5× coverage and α=0.5, with a ±62 CI: no head-to-head
+effect (gen1c's +87.5 ±138 and gen1d's −38.5 ±62 bracket zero), no
+exploitability change. A 73-min generation touches 0.03% of infosets,
+and on exactly those high-traffic lines the 200M-iteration blueprint is
+already near its best; search's edge lives in rare deep spots self-play
+rarely revisits. Policy-space expert iteration at this scale: honest
+negative. Pivot to value space: more/bigger turn data + larger net (the
+net is the measured +313 search edge). turn_data2.bin (30k spots,
+seed 2) generation launched.
+
+Experiment artifacts bp_gen1{,b,c,d}.bin (4 × 4.3GB) are candidates for
+deletion — none passed gates; diagnosis recorded here.
