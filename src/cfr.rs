@@ -610,7 +610,7 @@ pub fn sample_index(probs: &[f64], rng: &mut SmallRng) -> usize {
 /// The trained average strategy used at the table, together with the card
 /// abstraction it was trained under (config + k-means centroids), so play
 /// and benchmarking bucket cards exactly as training did.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Blueprint {
     pub strategies: HashMap<Vec<u8>, Vec<f32>>,
     pub iterations: u64,

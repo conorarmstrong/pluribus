@@ -763,7 +763,12 @@ fn main() {
                 records.len(),
                 started.elapsed().as_secs_f64()
             );
-            let (bp2, updated) = distill::merge(&policy.blueprint, &records, alpha);
+            // Reclaim sole ownership of the blueprint so the merge mutates
+            // in place instead of cloning a multi-GB map.
+            let bot::Policy { blueprint: bp_arc, .. } = policy;
+            let owned = Arc::try_unwrap(bp_arc)
+                .unwrap_or_else(|arc| (*arc).clone());
+            let (bp2, updated) = distill::merge(owned, &records, alpha);
             bp2.save(&out)
                 .unwrap_or_else(|e| die(&format!("save failed: {e}")));
             println!(

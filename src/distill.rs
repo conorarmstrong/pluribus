@@ -22,7 +22,6 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use std::collections::HashMap;
 
 pub struct DistillCfg {
     pub hands: u64,
@@ -108,14 +107,14 @@ pub fn collect(policy: &Policy, cfg: &HandConfig, dcfg: &DistillCfg) -> (Records
     (records, samples)
 }
 
-/// Blend the recorded search distributions into a copy of the blueprint:
-/// at each recorded key, `new = (1-alpha)·old + alpha·mean(search)` (both
+/// Blend the recorded search distributions into the blueprint IN PLACE
+/// (taken by value: a multi-GB blueprint must not be cloned): at each
+/// recorded key, `new = (1-alpha)·old + alpha·mean(search)` (both
 /// normalized first). Keys the blueprint never visited are inserted
 /// outright; length-mismatched entries (menu drift) are overwritten with
-/// the search distribution. Returns the new blueprint and how many keys
+/// the search distribution. Returns the blueprint and how many keys
 /// changed.
-pub fn merge(old: &Blueprint, records: &Records, alpha: f64) -> (Blueprint, u64) {
-    let mut strategies: HashMap<Vec<u8>, Vec<f32>> = old.strategies.clone();
+pub fn merge(mut bp: Blueprint, records: &Records, alpha: f64) -> (Blueprint, u64) {
     let mut updated = 0u64;
     for e in records.iter() {
         let (sum, count) = e.value();
@@ -123,7 +122,7 @@ pub fn merge(old: &Blueprint, records: &Records, alpha: f64) -> (Blueprint, u64)
             continue;
         }
         let mean: Vec<f64> = sum.iter().map(|x| x / count).collect();
-        let blended: Vec<f32> = match strategies.get(e.key()) {
+        let blended: Vec<f32> = match bp.strategies.get(e.key()) {
             Some(oldv) if oldv.len() == mean.len() => {
                 let total: f64 = oldv.iter().map(|&x| x as f64).sum();
                 if total > 0.0 {
@@ -137,19 +136,10 @@ pub fn merge(old: &Blueprint, records: &Records, alpha: f64) -> (Blueprint, u64)
             }
             _ => mean.iter().map(|&m| m as f32).collect(),
         };
-        strategies.insert(e.key().clone(), blended);
+        bp.strategies.insert(e.key().clone(), blended);
         updated += 1;
     }
-    (
-        Blueprint {
-            strategies,
-            iterations: old.iterations,
-            num_players: old.num_players,
-            abs_cfg: old.abs_cfg.clone(),
-            centroids: old.centroids.clone(),
-        },
-        updated,
-    )
+    (bp, updated)
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +150,7 @@ mod tests {
     use super::*;
     use crate::abstraction::{AbsConfig, Abstraction, Centroids};
     use crate::cfr::{TrainConfig, Trainer};
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
@@ -184,7 +175,7 @@ mod tests {
         // A brand-new key.
         records.insert(vec![3u8], (vec![0.6, 0.4], 1.0));
 
-        let (bp, updated) = merge(&old, &records, 0.5);
+        let (bp, updated) = merge(old, &records, 0.5);
         assert_eq!(updated, 3);
         let s1 = &bp.strategies[&vec![1u8]];
         assert!((s1[0] - 0.5).abs() < 1e-6, "0.5·0.75 + 0.5·0.25 = 0.5, got {}", s1[0]);
@@ -242,9 +233,11 @@ mod tests {
         };
         let (records, samples) = collect(&policy, &hand, &dcfg);
         assert!(samples > 0, "self-play must record searched decisions");
-        let (bp2, updated) = merge(&policy.blueprint, &records, dcfg.alpha);
+        let n_before = policy.blueprint.strategies.len();
+        let owned = (*policy.blueprint).clone();
+        let (bp2, updated) = merge(owned, &records, dcfg.alpha);
         assert!(updated > 0);
-        assert!(bp2.strategies.len() >= policy.blueprint.strategies.len());
+        assert!(bp2.strategies.len() >= n_before);
         // Every recorded key's entry is a valid distribution.
         for e in records.iter() {
             let s = &bp2.strategies[e.key()];
