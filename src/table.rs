@@ -265,6 +265,109 @@ pub fn run_eval_search(
     }
 }
 
+/// Paired search-gain evaluation: each deal is played twice — once with the
+/// hero using range-tracked search, once with the hero on the raw blueprint
+/// — with every seat drawing from its own per-deal RNG stream so the two
+/// playouts stay aligned until the hero actually deviates. The reported
+/// value is the mean per-deal difference (search minus blueprint): deals
+/// where search never changes an action contribute exactly zero variance,
+/// which makes small strategy gains measurable at modest hand counts.
+pub fn run_eval_paired(
+    policy: &Policy,
+    cfg: &HandConfig,
+    hands: u64,
+    params: crate::bot::SearchParams,
+    seed: u64,
+) -> EvalResult {
+    run_eval_paired_policies(policy, Some(params), policy, None, cfg, hands, seed)
+}
+
+/// Paired A-vs-B evaluation: each deal is played once with the hero as
+/// (policy_a, search params_a) and once as (policy_b, params_b), everyone
+/// else on policy_a's blueprint, with per-seat RNG streams keeping the two
+/// playouts aligned until the hero deviates. `None` params = raw blueprint.
+/// Reports the mean per-deal A−B difference.
+pub fn run_eval_paired_policies(
+    policy_a: &Policy,
+    params_a: Option<crate::bot::SearchParams>,
+    policy_b: &Policy,
+    params_b: Option<crate::bot::SearchParams>,
+    cfg: &HandConfig,
+    hands: u64,
+    seed: u64,
+) -> EvalResult {
+    use crate::search::RangeTracker;
+    let n = cfg.num_players;
+    let train_cfg = crate::cfr::TrainConfig {
+        hand: cfg.clone(),
+        prune_after: u64::MAX,
+        ..crate::cfr::TrainConfig::default()
+    };
+
+    let play_variant = |deck: [u8; 52],
+                        button: usize,
+                        hero: usize,
+                        i: u64,
+                        policy: &Policy,
+                        search: Option<crate::bot::SearchParams>| {
+        let mut seat_rngs: Vec<SmallRng> = (0..n)
+            .map(|p| {
+                SmallRng::seed_from_u64(
+                    seed ^ i.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ ((p as u64) << 48),
+                )
+            })
+            .collect();
+        let mut table = Table::new(cfg, button, deck);
+        let mut tracker = RangeTracker::new(n);
+        let mut guard = 0;
+        while !table.real.is_terminal() {
+            guard += 1;
+            assert!(guard < 500, "paired eval hand did not terminate");
+            let p = table.real.to_act();
+            let a = match (p == hero, search) {
+                (true, Some(params)) => policy.act_with_search(
+                    &table.shadow,
+                    &table.hist,
+                    params,
+                    &train_cfg,
+                    Some(&tracker),
+                    &mut seat_rngs[p],
+                ),
+                _ => policy.act_blueprint(&table.shadow, &table.hist, &mut seat_rngs[p]),
+            };
+            if search.is_some() {
+                tracker.observe(p, a, &table.shadow, &table.hist, &policy.blueprint, &policy.abs);
+            }
+            let street_before = table.real.street();
+            table.apply_abs(a, &policy.abs);
+            if search.is_some() && table.real.street() != street_before {
+                tracker.exclude(table.real.board());
+            }
+        }
+        table.real.utilities()[hero] as f64 / cfg.bb as f64 * 1000.0
+    };
+
+    let results: Vec<f64> = (0..hands)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng = SmallRng::seed_from_u64(seed ^ i.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let hero = (i % n as u64) as usize;
+            let button = rng.random_range(0..n);
+            let mut deck = fresh_deck();
+            deck.shuffle(&mut rng);
+            play_variant(deck, button, hero, i, policy_a, params_a)
+                - play_variant(deck, button, hero, i, policy_b, params_b)
+        })
+        .collect();
+
+    let (mean, ci95) = mean_ci(&results);
+    EvalResult {
+        hands,
+        mbb_per_hand: mean,
+        ci95,
+    }
+}
+
 /// Duplicate evaluation (ACPC-style variance reduction): each sampled deal
 /// (deck + button) is played `num_players` times with the hero rotated
 /// through every seat, and the deal's score is the mean over rotations —

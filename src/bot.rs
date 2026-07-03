@@ -21,6 +21,9 @@ use std::sync::Arc;
 /// richer than the turn solver's data-generation menu, still small enough
 /// to keep leaf-refresh network queries affordable.
 const FLOP_MENU: [u8; 3] = [1, 3, 5];
+/// Turn cards sampled per leaf refresh (of 49) — bounds net queries per
+/// refresh at real-time budgets.
+const FLOP_QUERY_TURNS: usize = 16;
 
 pub struct Policy {
     pub blueprint: Arc<Blueprint>,
@@ -73,6 +76,16 @@ impl Policy {
     pub fn with_value_net(mut self, net: Option<Arc<ValueNet>>) -> Self {
         self.value_net = net;
         self
+    }
+
+    /// Cheap clone (shared Arcs) with the value net removed — for paired
+    /// with-net vs without-net comparisons.
+    pub fn clone_without_net(&self) -> Policy {
+        Policy {
+            blueprint: self.blueprint.clone(),
+            abs: self.abs.clone(),
+            value_net: None,
+        }
     }
 
     /// The blueprint's full action distribution at the current infoset —
@@ -176,13 +189,14 @@ impl Policy {
         let hero = h.to_act();
         let villain = (0..h.num_players()).find(|&p| p != hero && !h.folded(p))?;
         let net_ref: &ValueNet = net;
-        let mut solver = crate::flop::FlopSolver::build(
+        let mut solver = crate::flop::FlopSolver::build_sampled(
             h,
             &self.abs,
             [tracker.seat_weights(hero), tracker.seat_weights(villain)],
             &FLOP_MENU,
             net_ref,
             25,
+            FLOP_QUERY_TURNS,
         )?;
         if params.adaptive {
             solver.solve_adaptive(10_000, params.time_ms, h.hole(hero), ADAPTIVE_PURITY);

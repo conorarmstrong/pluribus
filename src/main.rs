@@ -129,6 +129,15 @@ enum Cmd {
         /// combine with --search-ms).
         #[arg(long)]
         search: bool,
+        /// Paired search-gain mode: each deal played twice (hero searching
+        /// vs hero on blueprint, everyone else blueprint); reports the mean
+        /// per-deal difference — the value added by search itself.
+        #[arg(long)]
+        search_gain: bool,
+        /// Paired net-gain mode: search WITH the value net vs search
+        /// without it — isolates the value network's contribution.
+        #[arg(long)]
+        net_gain: bool,
         /// Per-decision search budget in milliseconds (with --search).
         #[arg(long, default_value_t = 100)]
         search_ms: u64,
@@ -372,6 +381,8 @@ fn main() {
             duplicate,
             aivat,
             search,
+            search_gain,
+            net_gain,
             search_ms,
             value_net,
             seed,
@@ -392,7 +403,11 @@ fn main() {
                 hands,
                 baseline,
                 players,
-                if search {
+                if net_gain {
+                    ", paired net-gain"
+                } else if search_gain {
+                    ", paired search-gain"
+                } else if search {
                     ", with search"
                 } else if aivat {
                     ", AIVAT"
@@ -403,12 +418,28 @@ fn main() {
                 }
             );
             let started = std::time::Instant::now();
-            let r = if search {
-                let params = SearchParams {
-                    time_ms: search_ms,
-                    adaptive: true,
-                    ..SearchParams::default()
-                };
+            let params = SearchParams {
+                time_ms: search_ms,
+                adaptive: true,
+                ..SearchParams::default()
+            };
+            let r = if net_gain {
+                if policy.value_net.is_none() {
+                    die("--net-gain needs --value-net");
+                }
+                let plain = policy.clone_without_net();
+                table::run_eval_paired_policies(
+                    &policy,
+                    Some(params),
+                    &plain,
+                    Some(params),
+                    &cfg,
+                    hands,
+                    seed,
+                )
+            } else if search_gain {
+                table::run_eval_paired(&policy, &cfg, hands, params, seed)
+            } else if search {
                 table::run_eval_search(&policy, &cfg, baseline, hands, params, seed)
             } else if aivat {
                 aivat::run_eval_aivat(&policy, &cfg, baseline, hands, seed)

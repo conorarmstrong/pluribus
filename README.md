@@ -262,6 +262,17 @@ Blueprint: 12 EMD k-means buckets/street, full bet menus, 128.5M infosets
   blueprint without search is exploitable by at least **+366 ±322
   mbb/hand** — the expected picture for an abstraction-level blueprint,
   and the reason Pluribus (and this bot) add real-time search on top.
+- **value network** (20,000 exactly-solved turn spots, 512×512 MLP):
+  validation loss 0.00089 weighted MSE ≈ 3% RMS of the maximum forward
+  swing. Trained in 7.5 minutes on CPU.
+- **search gains** (12,000 paired deals each, 800ms/decision, hero vs a
+  table of blueprints; the paired design cancels deal luck):
+  search with the value net beats search without it by **+313 ±198
+  mbb/hand**, and beats the raw blueprint by **+331 ±213**. Search
+  *without* the net measures ≈ 0 (−55 ±495; at 150ms budgets it is
+  actively harmful, −520 ±399) — undertrained MCCFR resolves are worse
+  than a 200M-iteration blueprint, and the learned leaf values are what
+  make real-time flop solving pay.
 - **vs the real Pluribus** (all 10,000 logged hands, 15,169 decisions,
   99.0% covered): our blueprint picks Pluribus's exact action as its own
   top choice **66.8%** of the time overall (75.6% preflop, ~45-50%

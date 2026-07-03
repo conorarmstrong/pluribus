@@ -102,6 +102,10 @@ pub struct FlopSolver<'a> {
     range: [Vec<f64>; 2],
     /// Candidate turn cards (board conflicts excluded).
     turns: Vec<Card>,
+    /// Indices into `turns` actually queried at leaves — either all of them
+    /// or a fixed random subsample (`query_turns.len() < turns.len()`) to
+    /// keep leaf-refresh network cost within real-time budgets.
+    query_turns: Vec<usize>,
     flop: [Card; 3],
     nodes: Vec<Node>,
     terminals: Vec<Terminal>,
@@ -125,6 +129,23 @@ impl<'a> FlopSolver<'a> {
         keep: &[u8],
         eval: &'a dyn LeafEval,
         refresh: u64,
+    ) -> Option<FlopSolver<'a>> {
+        Self::build_sampled(h, abs, ranges, keep, eval, refresh, usize::MAX)
+    }
+
+    /// Like `build`, but leaf evaluation queries only `max_query_turns`
+    /// randomly chosen (deterministic per spot) turn cards instead of all
+    /// 49 — a sampled chance approximation trading a little accuracy for a
+    /// large cut in network queries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_sampled(
+        h: &Hand,
+        abs: &Abstraction,
+        ranges: [&[f64]; 2],
+        keep: &[u8],
+        eval: &'a dyn LeafEval,
+        refresh: u64,
+        max_query_turns: usize,
     ) -> Option<FlopSolver<'a>> {
         if h.street() != Street::Flop || h.is_terminal() || h.live_count() != 2 {
             return None;
@@ -160,10 +181,25 @@ impl<'a> FlopSolver<'a> {
         }
 
         let turns: Vec<Card> = (0..52u8).filter(|&c| !on_board[c as usize]).collect();
+        let query_turns: Vec<usize> = if max_query_turns >= turns.len() {
+            (0..turns.len()).collect()
+        } else {
+            // Deterministic per spot: seed from the flop cards.
+            let seed = board.iter().fold(0xF10Cu64, |a, &c| a * 53 + c as u64);
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let mut idx: Vec<usize> = (0..turns.len()).collect();
+            for k in 0..max_query_turns {
+                let j = rng.random_range(k..idx.len());
+                idx.swap(k, j);
+            }
+            idx.truncate(max_query_turns);
+            idx
+        };
         let mut solver = FlopSolver {
             combos,
             range,
             turns,
+            query_turns,
             flop: [board[0], board[1], board[2]],
             nodes: Vec::new(),
             terminals: Vec::new(),
@@ -478,9 +514,10 @@ impl<'a> FlopSolver<'a> {
         let eval = self.eval;
 
         let cached: Vec<[Vec<f64>; 2]> = self
-            .turns
+            .query_turns
             .par_iter()
-            .map(|&tc| {
+            .map(|&ti| {
+                let tc = self.turns[ti];
                 let board = [flop[0], flop[1], flop[2], tc];
                 // Mask combos containing the turn card out of both ranges.
                 let mask = |r: &[f64]| -> Vec<f64> {
@@ -509,15 +546,20 @@ impl<'a> FlopSolver<'a> {
         self.leaves[li].cached = cached;
     }
 
-    /// Counterfactual leaf values for player `u`: chance over turn cards
-    /// (weight 1/45), forward values minus own commitment, times compatible
-    /// opponent mass.
+    /// Counterfactual leaf values for player `u`: chance over the queried
+    /// turn cards, forward values minus own commitment, times compatible
+    /// opponent mass. With the full turn set this is the exact 1/(T−4)
+    /// chance weighting; with a subsample the per-combo average over its
+    /// valid queried turns is rescaled by (T−2)/(T−4) — identical to the
+    /// full formula when nothing is subsampled.
     fn leaf_values(&self, li: usize, u: usize, reach_opp: &[f64]) -> Vec<f64> {
         let leaf = &self.leaves[li];
-        let p = 1.0 / (self.turns.len() as f64 - 4.0);
+        let t_all = self.turns.len() as f64;
         let mut vals = vec![0.0; NUM_COMBOS];
-        for (ti, &tc) in self.turns.iter().enumerate() {
-            let vhat = &leaf.cached[ti][u];
+        let mut counts = vec![0u32; NUM_COMBOS];
+        for (qi, &ti) in self.query_turns.iter().enumerate() {
+            let tc = self.turns[ti];
+            let vhat = &leaf.cached[qi][u];
             // Aggregates of reach_opp excluding combos blocked by the turn.
             let mut total = 0.0f64;
             let mut card = [0.0f64; 52];
@@ -533,11 +575,18 @@ impl<'a> FlopSolver<'a> {
                 if combo[0] == tc || combo[1] == tc {
                     continue;
                 }
+                counts[ci] += 1;
                 let compat =
                     total - card[combo[0] as usize] - card[combo[1] as usize] + reach_opp[ci];
                 if compat > 0.0 {
-                    vals[ci] += p * (vhat[ci] - leaf.commit[u]) * compat;
+                    vals[ci] += (vhat[ci] - leaf.commit[u]) * compat;
                 }
+            }
+        }
+        let scale = (t_all - 2.0) / (t_all - 4.0);
+        for (v, &n) in vals.iter_mut().zip(&counts) {
+            if n > 0 {
+                *v *= scale / n as f64;
             }
         }
         vals
@@ -806,6 +855,27 @@ mod tests {
             }
         }
         assert!(checked > 5);
+    }
+
+    /// Turn-card subsampling: sampled leaf evaluation must still produce
+    /// normalized strategies and reduce to fewer cached queries.
+    #[test]
+    fn sampled_leaf_queries_still_normalize() {
+        let (h, abs) = flop_p1_to_act();
+        let uni = vec![1.0; NUM_COMBOS];
+        let oracle = EquityOracle;
+        let mut s =
+            FlopSolver::build_sampled(&h, &abs, [&uni, &uni], &[3], &oracle, 10, 12).unwrap();
+        assert_eq!(s.query_turns.len(), 12);
+        s.solve(15, 120_000);
+        let mut checked = 0;
+        for ci in (0..NUM_COMBOS).step_by(173) {
+            if let Some((_, p)) = s.root_strategy(s.combos[ci]) {
+                assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+                checked += 1;
+            }
+        }
+        assert!(checked > 3);
     }
 
     /// A flopped royal flush facing an all-in must call (the runout-terminal
