@@ -13,12 +13,20 @@ use crate::abstraction::{AbsAction, Abstraction};
 use crate::cfr::{sample_index, Blueprint, LeafCfg, TrainConfig, Trainer};
 use crate::engine::{Hand, Street};
 use crate::search::RangeTracker;
+use crate::valuenet::ValueNet;
 use rand::rngs::SmallRng;
 use std::sync::Arc;
+
+/// Bet sizes used by the value-net flop solver (33%, 75%, 150% + all-in):
+/// richer than the turn solver's data-generation menu, still small enough
+/// to keep leaf-refresh network queries affordable.
+const FLOP_MENU: [u8; 3] = [1, 3, 5];
 
 pub struct Policy {
     pub blueprint: Arc<Blueprint>,
     pub abs: Arc<Abstraction>,
+    /// Belief-state value net: enables ReBeL-style flop solving.
+    pub value_net: Option<Arc<ValueNet>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,7 +53,13 @@ impl Policy {
         Policy {
             blueprint: Arc::new(blueprint),
             abs,
+            value_net: None,
         }
+    }
+
+    pub fn with_value_net(mut self, net: Option<Arc<ValueNet>>) -> Self {
+        self.value_net = net;
+        self
     }
 
     /// The blueprint's full action distribution at the current infoset —
@@ -110,6 +124,15 @@ impl Policy {
                 }
             }
         }
+        // Flop spots with two live players and a value net: ReBeL-style
+        // depth-limited vector solving with learned leaf values.
+        if h.street() == Street::Flop && h.live_count() == 2 {
+            if let (Some(tr), Some(net)) = (tracker, &self.value_net) {
+                if let Some(a) = self.act_flop_net(h, tr, net, params, rng) {
+                    return a;
+                }
+            }
+        }
         let leaf = (h.street() == Street::Flop).then(|| LeafCfg {
             blueprint: self.blueprint.clone(),
             limit: Street::Flop,
@@ -124,6 +147,33 @@ impl Policy {
             }
         }
         self.act_blueprint(h, hist, rng)
+    }
+
+    /// Depth-limited flop resolve over both players' tracked ranges with
+    /// value-net leaves. None when the spot doesn't qualify or the hero's
+    /// combo got no strategy weight (caller falls back to MCCFR search).
+    fn act_flop_net(
+        &self,
+        h: &Hand,
+        tracker: &RangeTracker,
+        net: &Arc<ValueNet>,
+        params: SearchParams,
+        rng: &mut SmallRng,
+    ) -> Option<AbsAction> {
+        let hero = h.to_act();
+        let villain = (0..h.num_players()).find(|&p| p != hero && !h.folded(p))?;
+        let net_ref: &ValueNet = net;
+        let mut solver = crate::flop::FlopSolver::build(
+            h,
+            &self.abs,
+            [tracker.seat_weights(hero), tracker.seat_weights(villain)],
+            &FLOP_MENU,
+            net_ref,
+            25,
+        )?;
+        solver.solve(10_000, params.time_ms);
+        let (acts, s) = solver.root_strategy(h.hole(hero))?;
+        Some(acts[sample_index(&s, rng)])
     }
 
     /// Exact river resolve over both players' tracked ranges. None when the

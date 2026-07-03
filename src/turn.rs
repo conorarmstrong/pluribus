@@ -231,7 +231,7 @@ impl TurnSolver {
             let kids: Vec<Kid> = (0..self.rivers.len())
                 .map(|ri| {
                     let mut child = h.clone();
-                    child.force_river(self.rivers[ri]);
+                    child.force_board_card(4, self.rivers[ri]);
                     self.expand(child, abs, seats, keep, Some(ri))
                 })
                 .collect();
@@ -265,10 +265,12 @@ impl TurnSolver {
         self.nodes.len() - 1
     }
 
+    #[allow(dead_code)] // diagnostics + tests
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
+    #[allow(dead_code)]
     pub fn iterations(&self) -> u64 {
         self.iters
     }
@@ -284,8 +286,8 @@ impl TurnSolver {
                 let reach_own = self.range[u].clone();
                 let reach_opp = self.range[1 - u].clone();
                 let v = self.walk(Kid::Node(self.root()), u, &reach_own, &reach_opp, t);
-                for ci in 0..NUM_COMBOS {
-                    self.root_vals[u][ci] += t * v[ci];
+                for (acc, &x) in self.root_vals[u].iter_mut().zip(&v) {
+                    *acc += t * x;
                 }
             }
             self.weight_sum += t;
@@ -293,6 +295,7 @@ impl TurnSolver {
     }
 
     /// Average strategy at the root for solver player 0's `hole`.
+    #[allow(dead_code)] // tests + future turn-play integration
     pub fn root_strategy(&self, hole: [Card; 2]) -> Option<(Vec<AbsAction>, Vec<f64>)> {
         let node = &self.nodes[self.root()];
         debug_assert_eq!(node.player, 0);
@@ -408,8 +411,8 @@ impl TurnSolver {
                 }
                 let kid = self.nodes[ni].kids[a].shallow();
                 let v = self.walk(kid, u, reach_own, &opp, t);
-                for ci in 0..NUM_COMBOS {
-                    vals[ci] += v[ci];
+                for (o, &x) in vals.iter_mut().zip(&v) {
+                    *o += x;
                 }
             }
             vals

@@ -435,8 +435,8 @@ pub(crate) fn showdown_sweep(
             }
             j += 1;
         }
-        for k in i..j {
-            let ci = sorted[k] as usize;
+        for &ck in &sorted[i..j] {
+            let ci = ck as usize;
             let c = combos[ci];
             let (c0, c1) = (c[0] as usize, c[1] as usize);
             // Opponent combos not sharing a card with ours:

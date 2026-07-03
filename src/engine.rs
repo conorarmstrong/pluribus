@@ -337,12 +337,12 @@ impl Hand {
         }
     }
 
-    /// Overwrite the river card (board slot 4). For range-vector solvers
-    /// that enumerate public river outcomes; holes and deck are untouched,
-    /// so the hand must not be used for engine showdowns afterwards.
-    pub fn force_river(&mut self, c: Card) {
-        debug_assert_eq!(self.board_len, 5);
-        self.board[4] = c;
+    /// Overwrite a dealt board card. For range-vector solvers that enumerate
+    /// public chance outcomes; holes and deck are untouched, so the hand
+    /// must not be used for engine showdowns afterwards.
+    pub fn force_board_card(&mut self, idx: usize, c: Card) {
+        debug_assert!(idx < self.board_len);
+        self.board[idx] = c;
     }
 
     // --- internals -------------------------------------------------------

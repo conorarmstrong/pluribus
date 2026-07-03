@@ -6,12 +6,15 @@ mod cards;
 mod cfr;
 mod engine;
 mod eval;
+mod flop;
 mod lbr;
+mod net;
 mod play;
 mod river;
 mod search;
 mod table;
 mod turn;
+mod valuenet;
 
 use abstraction::{AbsConfig, Abstraction, Centroids};
 use bot::{Policy, SearchParams};
@@ -88,6 +91,9 @@ enum Cmd {
         /// 0 = uniform random, higher = more rational; omit for equilibrium.
         #[arg(long)]
         qre_lambda: Option<f64>,
+        /// Belief-state value net enabling ReBeL-style flop solving.
+        #[arg(long)]
+        value_net: Option<String>,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -123,6 +129,42 @@ enum Cmd {
         /// Board completions sampled per equity estimate.
         #[arg(long, default_value_t = 100)]
         runouts: u32,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
+    /// Generate exactly-solved turn spots (blueprint self-play + turn
+    /// solver) as training data for the belief-state value network.
+    GenTurnData {
+        #[arg(long, default_value = "blueprint.bin")]
+        blueprint: String,
+        #[arg(long, default_value = "turn_data.bin")]
+        out: String,
+        #[arg(long, default_value_t = 10_000)]
+        samples: usize,
+        /// Vector-CFR iterations per exact turn solve.
+        #[arg(long, default_value_t = 200)]
+        solve_iters: u64,
+        /// Per-solve wall-clock cap in milliseconds.
+        #[arg(long, default_value_t = 30_000)]
+        solve_ms: u64,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
+    /// Train the belief-state value network on solved turn spots.
+    TrainValueNet {
+        #[arg(long, default_value = "turn_data.bin")]
+        data: String,
+        #[arg(long, default_value = "value_net.bin")]
+        out: String,
+        /// Hidden layer sizes, comma-separated.
+        #[arg(long, default_value = "512,512")]
+        hidden: String,
+        #[arg(long, default_value_t = 50)]
+        epochs: usize,
+        #[arg(long, default_value_t = 1e-3)]
+        lr: f32,
+        #[arg(long, default_value_t = 128)]
+        batch: usize,
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
@@ -264,9 +306,16 @@ fn main() {
             search,
             search_ms,
             qre_lambda,
+            value_net,
             seed,
         } => {
-            let policy = load_policy(&blueprint);
+            let net = value_net.map(|p| {
+                let n = valuenet::ValueNet::load(&p)
+                    .unwrap_or_else(|e| die(&format!("cannot load value net '{p}': {e}")));
+                println!("loaded value net from {p}");
+                Arc::new(n)
+            });
+            let policy = load_policy(&blueprint).with_value_net(net);
             let opts = play::PlayOpts {
                 cfg: HandConfig {
                     num_players: players,
@@ -351,6 +400,80 @@ fn main() {
                 started.elapsed().as_secs_f64()
             );
             println!("(lower bound on the blueprint's exploitability; 0 = unexploited)");
+        }
+
+        Cmd::GenTurnData {
+            blueprint,
+            out,
+            samples,
+            solve_iters,
+            solve_ms,
+            seed,
+        } => {
+            let policy = load_policy(&blueprint);
+            println!(
+                "generating {samples} exactly-solved turn spots \
+                 ({solve_iters} CFR iters or {solve_ms}ms per solve)..."
+            );
+            let started = std::time::Instant::now();
+            let data = valuenet::generate(&policy, solve_iters, solve_ms, samples, seed, &|done| {
+                println!(
+                    "  {done}/{samples} samples ({:.1}s elapsed)",
+                    started.elapsed().as_secs_f64()
+                );
+            });
+            valuenet::save_samples(&out, &data)
+                .unwrap_or_else(|e| die(&format!("cannot write {out}: {e}")));
+            println!(
+                "wrote {} samples to {out} in {:.1}s",
+                data.len(),
+                started.elapsed().as_secs_f64()
+            );
+        }
+
+        Cmd::TrainValueNet {
+            data,
+            out,
+            hidden,
+            epochs,
+            lr,
+            batch,
+            seed,
+        } => {
+            let samples = valuenet::load_samples(&data)
+                .unwrap_or_else(|e| die(&format!("cannot load {data}: {e}")));
+            let hidden: Vec<usize> = hidden
+                .split(',')
+                .map(|s| s.trim().parse().unwrap_or_else(|_| die("bad --hidden")))
+                .collect();
+            println!(
+                "training value net on {} samples (hidden {hidden:?}, {epochs} epochs)...",
+                samples.len()
+            );
+            let started = std::time::Instant::now();
+            let (net, val_loss) = valuenet::train(
+                &samples,
+                &hidden,
+                epochs,
+                lr,
+                batch,
+                seed,
+                &mut |e, tr, va| {
+                    println!(
+                        "  epoch {:>3}: train {:.5}  val {:.5}  ({:.0}s)",
+                        e + 1,
+                        tr,
+                        va,
+                        started.elapsed().as_secs_f64()
+                    );
+                },
+            );
+            net.save(&out)
+                .unwrap_or_else(|e| die(&format!("cannot write {out}: {e}")));
+            println!(
+                "value net saved to {out} (final val loss {val_loss:.5}, {:.0}s)",
+                started.elapsed().as_secs_f64()
+            );
         }
 
         Cmd::Inspect { blueprint } => {
