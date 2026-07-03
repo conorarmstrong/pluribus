@@ -129,50 +129,57 @@ impl Policy {
     /// RangeTracker, opponents' hidden cards are sampled from their tracked
     /// ranges; flop subgames are depth-limited to the end of the street with
     /// biased-continuation leaf values.
+    ///
+    /// Subgames are rooted at `real` — the true table state — so an
+    /// opponent's off-tree bet is re-solved at its actual size (nested
+    /// re-solving) instead of being priced at the nearest abstract size.
+    /// `shadow` (the on-tree mirror) is used only for blueprint infoset
+    /// lookups; pass the same hand twice when they cannot diverge.
     pub fn act_with_search(
         &self,
-        h: &Hand,
+        real: &Hand,
+        shadow: &Hand,
         hist: &[u8],
         params: SearchParams,
         train_cfg: &TrainConfig,
         tracker: Option<&RangeTracker>,
         rng: &mut SmallRng,
     ) -> AbsAction {
-        if h.street() == Street::Preflop {
-            return self.act_blueprint(h, hist, rng);
+        if real.street() == Street::Preflop {
+            return self.act_blueprint(shadow, hist, rng);
         }
         // River spots with two live players: exact range-vs-range CFR+
         // (river.rs) instead of sampled MCCFR.
-        if h.street() == Street::River && h.live_count() == 2 {
+        if real.street() == Street::River && real.live_count() == 2 {
             if let Some(tr) = tracker {
-                if let Some(a) = self.act_river_exact(h, hist, tr, params, rng) {
+                if let Some(a) = self.act_river_exact(real, hist, tr, params, rng) {
                     return a;
                 }
             }
         }
         // Flop spots with two live players and a value net: ReBeL-style
         // depth-limited vector solving with learned leaf values.
-        if h.street() == Street::Flop && h.live_count() == 2 {
+        if real.street() == Street::Flop && real.live_count() == 2 {
             if let (Some(tr), Some(net)) = (tracker, &self.value_net) {
-                if let Some(a) = self.act_flop_net(h, tr, net, params, rng) {
+                if let Some(a) = self.act_flop_net(real, tr, net, params, rng) {
                     return a;
                 }
             }
         }
-        let leaf = (h.street() == Street::Flop).then(|| LeafCfg {
+        let leaf = (real.street() == Street::Flop).then(|| LeafCfg {
             blueprint: self.blueprint.clone(),
             limit: Street::Flop,
         });
-        let solver = resolve_subgame(self.abs.clone(), train_cfg, h, hist, params, tracker, leaf);
-        let p = h.to_act();
-        let bucket = solver.abs.bucket(h.hole(p), h.board(), rng);
+        let solver = resolve_subgame(self.abs.clone(), train_cfg, real, hist, params, tracker, leaf);
+        let p = real.to_act();
+        let bucket = solver.abs.bucket(real.hole(p), real.board(), rng);
         if let Some(s) = solver.avg_strategy(bucket, hist) {
-            let acts = solver.abs.abstract_actions(h);
+            let acts = solver.abs.abstract_actions(real);
             if s.len() == acts.len() {
                 return acts[sample_index(&s, rng)];
             }
         }
-        self.act_blueprint(h, hist, rng)
+        self.act_blueprint(shadow, hist, rng)
     }
 
     /// Depth-limited flop resolve over both players' tracked ranges with
@@ -595,6 +602,7 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(5);
         let a = policy.act_with_search(
             &h,
+            &h,
             &hist,
             SearchParams {
                 time_ms: 5_000,
@@ -608,6 +616,119 @@ mod tests {
             &mut rng,
         );
         assert_eq!(a, AbsAction::CheckCall, "royal must call even with the gadget");
+    }
+
+    /// Nested re-solving of off-tree bets: the bot must price an off-tree
+    /// bet at its REAL amount, not the nearest abstract size. Villain bets
+    /// a real 800 into a 200 pot, which log-maps to the 400 abstract bet.
+    /// Hero's bluff-catcher has 42% equity against the tracked range: a
+    /// call at the mapped price (needs 40%) but a fold at the real price
+    /// (needs 44.4%). Solving from the real state must fold; the control
+    /// (solving from the shadow, the old behavior) must call — which also
+    /// validates that the pricing window is set up correctly.
+    #[test]
+    fn search_prices_off_tree_bets_from_the_real_state() {
+        use crate::search::RangeTracker;
+        use crate::table::Table;
+        let front = parse_cards("Ah 3c Kd 9c Qs Js Ts 3h 4d").unwrap();
+        let mut deck = fresh_deck();
+        let mut used = [false; 52];
+        for (i, &c) in front.iter().enumerate() {
+            deck[i] = c;
+            used[c as usize] = true;
+        }
+        let mut idx = front.len();
+        for c in 0..52u8 {
+            if !used[c as usize] {
+                deck[idx] = c;
+                idx += 1;
+            }
+        }
+        let hand_cfg = HandConfig {
+            num_players: 2,
+            stack: 2_000,
+            sb: 50,
+            bb: 100,
+        };
+        let abs = Arc::new(abs_small());
+        let policy = Policy::new(
+            Blueprint {
+                strategies: HashMap::new(),
+                iterations: 0,
+                num_players: 2,
+                abs_cfg: AbsConfig::default(),
+                centroids: None,
+            },
+            abs.clone(),
+        );
+        let mut table = Table::new(&hand_cfg, 0, deck);
+        // Check down to the river.
+        for _ in 0..6 {
+            table.apply_abs(AbsAction::CheckCall, &abs);
+        }
+        assert_eq!(table.real.street(), Street::River);
+        assert_eq!(table.real.to_act(), 1);
+        // Villain bets an OFF-TREE 800 into the 200 pot.
+        table.apply_concrete(PlayerAction::RaiseTo(800), &abs);
+        assert_eq!(table.real.to_act(), 0);
+        assert_eq!(table.real.to_call(), 800, "real price is the off-tree bet");
+        assert_eq!(
+            table.shadow.to_call(),
+            400,
+            "shadow must have mapped the bet to the 200%-pot abstract size"
+        );
+
+        // Villain's tracked range: 42% a bluff hero beats (pair of twos),
+        // 58% the nuts (royal). Hero (Ah 3c, pair of threes) has 42% equity.
+        let mut tracker = RangeTracker::new(2);
+        tracker.set_all(1, 0.0);
+        let bluff = parse_cards("2c 2h").unwrap();
+        let nuts = parse_cards("As Ks").unwrap();
+        tracker.set_weight(1, [bluff[0], bluff[1]], 0.42);
+        tracker.set_weight(1, [nuts[0], nuts[1]], 0.58);
+
+        let train_cfg = TrainConfig {
+            hand: hand_cfg,
+            prune_after: u64::MAX,
+            ..TrainConfig::default()
+        };
+        let params = SearchParams {
+            time_ms: 10_000,
+            max_iters: 20_000,
+            qre_lambda: None,
+            safe_resolve: false,
+            adaptive: false,
+        };
+        // EV of calling 800 real: .42(+900) - .58(900) = -144 < fold -100.
+        let mut rng = SmallRng::seed_from_u64(9);
+        let a = policy.act_with_search(
+            &table.real,
+            &table.shadow,
+            &table.hist,
+            params,
+            &train_cfg,
+            Some(&tracker),
+            &mut rng,
+        );
+        assert_eq!(a, AbsAction::Fold, "must fold at the real 800 price");
+
+        // Control (old behavior): priced at the mapped 400, calling is
+        // correct: .42(+500) - .58(500) = -80 > fold -100.
+        let mut rng = SmallRng::seed_from_u64(9);
+        let a = policy.act_with_search(
+            &table.shadow,
+            &table.shadow,
+            &table.hist,
+            params,
+            &train_cfg,
+            Some(&tracker),
+            &mut rng,
+        );
+        assert_eq!(
+            a,
+            AbsAction::CheckCall,
+            "at the mapped price the same spot is a call — pricing window sanity"
+        );
     }
 
     /// Depth-limited, range-tracked flop resolve: must produce a trained

@@ -279,6 +279,7 @@ pub fn run_eval_search(
                 let p = table.real.to_act();
                 let a = if p == hero {
                     policy.act_with_search(
+                        &table.real,
                         &table.shadow,
                         &table.hist,
                         params,
@@ -369,6 +370,7 @@ pub fn run_eval_paired_policies(
             let p = table.real.to_act();
             let a = match (p == hero, search) {
                 (true, Some(params)) => policy.act_with_search(
+                    &table.real,
                     &table.shadow,
                     &table.hist,
                     params,

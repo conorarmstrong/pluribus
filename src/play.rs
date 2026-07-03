@@ -83,6 +83,7 @@ pub fn play(policy: &Policy, opts: &PlayOpts) {
                 let a = match opts.search {
                     Some(params) if table.real.street() != Street::Preflop => policy
                         .act_with_search(
+                            &table.real,
                             &table.shadow,
                             &table.hist,
                             params,
@@ -92,7 +93,7 @@ pub fn play(policy: &Policy, opts: &PlayOpts) {
                         ),
                     _ => policy.act_blueprint(&table.shadow, &table.hist, &mut rng),
                 };
-                let concrete = policy.abs.concrete(&table.shadow, a);
+                let concrete = policy.abs.concrete(&table.real, a);
                 describe_action(p, a, concrete, &table);
                 tracker.observe(
                     p,

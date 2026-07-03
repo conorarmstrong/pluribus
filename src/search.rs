@@ -68,6 +68,17 @@ impl RangeTracker {
         }
     }
 
+    /// Overwrite every combo weight for a seat (belief injection: rigged
+    /// ranges in tests, learned ranges from a belief model).
+    pub fn set_all(&mut self, seat: usize, w: f64) {
+        self.weights[seat].fill(w);
+    }
+
+    /// Overwrite one combo's weight for a seat.
+    pub fn set_weight(&mut self, seat: usize, hole: [Card; 2], w: f64) {
+        self.weights[seat][combo_index(hole[0], hole[1])] = w;
+    }
+
     /// Raw (unnormalized) weights over all 1326 combos for a seat, indexed
     /// by `combo_index`. Feeds the river range-vector solver.
     pub fn seat_weights(&self, seat: usize) -> &[f64] {
