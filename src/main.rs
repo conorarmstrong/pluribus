@@ -238,6 +238,10 @@ enum Cmd {
         focal: String,
         #[arg(long)]
         field: String,
+        /// Previous blueprint for strategic-abstraction lookups (applied to
+        /// whichever side is strategic).
+        #[arg(long)]
+        strat_prev: Option<String>,
         #[arg(long, default_value_t = 200_000)]
         hands: u64,
         #[arg(long, default_value_t = 1)]
@@ -644,11 +648,12 @@ fn main() {
         Cmd::Crossplay {
             focal,
             field,
+            strat_prev,
             hands,
             seed,
         } => {
-            let focal_p = load_policy(&focal);
-            let field_p = load_policy(&field);
+            let focal_p = load_policy_strat(&focal, strat_prev.as_deref());
+            let field_p = load_policy_strat(&field, strat_prev.as_deref());
             if focal_p.blueprint.num_players != field_p.blueprint.num_players {
                 die("blueprints trained for different table sizes");
             }

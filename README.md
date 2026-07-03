@@ -282,6 +282,41 @@ Blueprint: 12 EMD k-means buckets/street, full bet menus, 128.5M infosets
   validated chip-for-chip: 9,992/9,992 checkable hands reproduce their
   logged finishing stacks exactly.
 
+## Research experiments
+
+Beyond the headline results above, the repo carries a set of controlled
+experiments (all reproducible from the CLI):
+
+- **Strategy-aware abstraction co-training** (`train --strategic-from`):
+  cluster flop/turn hands by how a previously trained blueprint plays and
+  realizes them (action distribution at a standardized spot + rollout value
+  statistics) instead of by equity distributions. At an equal 30M-iteration
+  budget and 12 buckets, strategic clustering scored **+220/+305 mbb/hand
+  more vs caller/random baselines** (borderline significance) but showed
+  **no LBR-exploitability improvement and no head-to-head edge** over
+  equity clustering (both cross-play directions ≈ 0 ± 246) — at ~10× the
+  per-iteration training cost. Verdict: an honest negative — equity-
+  distribution clustering is hard to beat at this scale.
+- **Restricted Nash response** (`train --rnr-model caller --rnr-p 0.9`):
+  with probability p, a traversal's opponents all play a fixed model; the
+  learned strategy maximally exploits the model while staying
+  equilibrium-anchored with weight 1−p. Verified: RNR(caller, 0.9) beats a
+  calling station by clearly more than the equal-budget equilibrium.
+- **Portfolio bandit** (`portfolio.rs`): UCB1 over a set of blueprints
+  (equilibrium + RNR exploiters), choosing per hand. Against a station it
+  converges to the exploitative arm and outscores equilibrium-alone;
+  against opponents that punish exploiters it retreats to the equilibrium
+  arm — exploitation with bounded downside.
+- **Safety ablation** (`ablate-safety`) and **paired search-gain
+  measurement** (`eval --search-gain / --net-gain`): see above.
+- **Equilibrium selection in 6-max** (`crossplay`): three independent
+  30M-iteration self-play runs (`train --train-seed`), cross-played in all
+  six directions at 200k hands each. Every cell (and the self-play sanity
+  cell) is within ±80 mbb/hand of zero (CIs ±245): with the card
+  abstraction held fixed, **independent MCCFR equilibria are
+  interchangeable in practice** — the theoretical multiplayer
+  equilibrium-selection worry does not materialize at this scale.
+
 ## Performance notes
 
 - Hand evaluation: bitmask/rank-count based, no lookup tables, ~10ns per
