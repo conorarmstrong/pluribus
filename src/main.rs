@@ -11,6 +11,7 @@ mod flop;
 mod lbr;
 mod net;
 mod play;
+mod portfolio;
 mod river;
 mod search;
 mod table;
@@ -75,6 +76,13 @@ enum Cmd {
         /// --strat-prev pointing at the same file.
         #[arg(long)]
         strategic_from: Option<String>,
+        /// Restricted Nash response: opponent model (random | caller).
+        #[arg(long)]
+        rnr_model: Option<Baseline>,
+        /// RNR mixture weight p (0 = plain equilibrium, 1 = pure best
+        /// response to the model). Requires --rnr-model.
+        #[arg(long, default_value_t = 0.5)]
+        rnr_p: f64,
         /// Disable negative-regret pruning.
         #[arg(long)]
         no_prune: bool,
@@ -248,6 +256,8 @@ fn main() {
             kmeans_samples,
             raw_buckets,
             strategic_from,
+            rnr_model,
+            rnr_p,
             no_prune,
             threads,
         } => {
@@ -309,7 +319,11 @@ fn main() {
                     if let Some(sc) = strat_ctx {
                         abs = abs.with_strat(sc);
                     }
-                    Trainer::new(Arc::new(abs), train_cfg)
+                    let rnr = rnr_model.map(|model| {
+                        println!("RNR training: model {model:?}, p = {rnr_p}");
+                        cfr::RnrCfg { model, p: rnr_p }
+                    });
+                    Trainer::new(Arc::new(abs), train_cfg).with_rnr(rnr)
                 }
             };
 

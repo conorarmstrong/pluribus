@@ -67,6 +67,19 @@ const BIAS_MULT: f64 = 5.0;
 /// Re-randomizes hidden cards at a subgame root before each traversal.
 pub type RootSampler<'a> = dyn Fn(&mut Hand, &mut SmallRng) + Sync + 'a;
 
+/// Restricted Nash response training (Johanson et al. 2008): with
+/// probability `p`, decided once per traversal, every opponent plays the
+/// fixed `model` for the whole hand (and contributes nothing to the average
+/// strategy); otherwise the traversal is ordinary self-play. The learned
+/// strategy maximally exploits the model subject to staying an equilibrium
+/// against rational play with weight (1 − p) — an exploitation dial with a
+/// bounded-exploitability knob.
+#[derive(Debug, Clone, Copy)]
+pub struct RnrCfg {
+    pub model: crate::table::Baseline,
+    pub p: f64,
+}
+
 pub struct Trainer {
     pub abs: Arc<Abstraction>,
     pub cfg: TrainConfig,
@@ -80,6 +93,8 @@ pub struct Trainer {
     /// Model opponents as lambda-rational (logit QRE) instead of
     /// regret-matching at their nodes. Subgame-only exploitation knob.
     qre_lambda: Option<f64>,
+    /// Restricted Nash response mixture (blueprint training only).
+    rnr: Option<RnrCfg>,
 }
 
 /// Approximate logit quantal-response distribution over a node's actions:
@@ -132,11 +147,17 @@ impl Trainer {
             leaf: None,
             plus: false,
             qre_lambda: None,
+            rnr: None,
         }
     }
 
     pub fn with_qre(mut self, lambda: Option<f64>) -> Self {
         self.qre_lambda = lambda;
+        self
+    }
+
+    pub fn with_rnr(mut self, rnr: Option<RnrCfg>) -> Self {
+        self.rnr = rnr;
         self
     }
 
@@ -183,8 +204,12 @@ impl Trainer {
             }
             let weight = t as f64;
             let prune_ok = t > self.cfg.prune_after;
+            let model_opp = self
+                .rnr
+                .as_ref()
+                .is_some_and(|r| rng.random::<f64>() < r.p);
             let mut hist = Vec::with_capacity(32);
-            self.traverse(&hand, &mut hist, traverser, weight, prune_ok, &mut rng);
+            self.traverse(&hand, &mut hist, traverser, weight, prune_ok, model_opp, &mut rng);
             let done = self.iters_done.fetch_add(1, Ordering::Relaxed) + 1;
             if done.is_multiple_of(4096) {
                 progress(done - start);
@@ -229,13 +254,15 @@ impl Trainer {
                     None => h.resample_hidden(None, &mut rng),
                 }
                 let mut hist = root_hist.to_vec();
-                self.traverse(&h, &mut hist, traverser, t as f64, false, &mut rng);
+                self.traverse(&h, &mut hist, traverser, t as f64, false, false, &mut rng);
             });
             self.iters_done.fetch_add(batch, Ordering::Relaxed);
         }
     }
 
     /// One external-sampling traversal. Returns utility (chips) for `traverser`.
+    /// `model_opp`: this traversal's opponents play the fixed RNR model.
+    #[allow(clippy::too_many_arguments)]
     fn traverse(
         &self,
         h: &Hand,
@@ -243,6 +270,7 @@ impl Trainer {
         traverser: usize,
         weight: f64,
         prune_ok: bool,
+        model_opp: bool,
         rng: &mut SmallRng,
     ) -> f64 {
         if h.is_terminal() {
@@ -299,7 +327,8 @@ impl Trainer {
                 if !child.is_terminal() && child.street() != h.street() {
                     hist.push(TOKEN_STREET_SEP);
                 }
-                utils[i] = self.traverse(&child, hist, traverser, weight, prune_ok, rng);
+                utils[i] =
+                    self.traverse(&child, hist, traverser, weight, prune_ok, model_opp, rng);
                 hist.truncate(depth);
                 node_util += sigma[i] * utils[i];
             }
@@ -314,6 +343,19 @@ impl Trainer {
                 }
             }
             node_util
+        } else if model_opp {
+            // RNR model traversal: the opponent plays the fixed model and
+            // contributes nothing to the learned average strategy.
+            let model = self.rnr.as_ref().expect("model_opp without rnr").model;
+            let a = crate::table::baseline_action(model, h, &self.abs, rng);
+            let a = if acts.contains(&a) { a } else { acts[0] };
+            let mut child = h.clone();
+            child.apply(self.abs.concrete(h, a));
+            hist.push(a.token());
+            if !child.is_terminal() && child.street() != h.street() {
+                hist.push(TOKEN_STREET_SEP);
+            }
+            self.traverse(&child, hist, traverser, weight, prune_ok, model_opp, rng)
         } else {
             // Sample one opponent action from their modeled strategy
             // (regret matching, or logit QRE when exploiting) and
@@ -340,7 +382,7 @@ impl Trainer {
                 hist.push(TOKEN_STREET_SEP);
             }
             // No truncation needed: the nearest traverser ancestor restores hist.
-            self.traverse(&child, hist, traverser, weight, prune_ok, rng)
+            self.traverse(&child, hist, traverser, weight, prune_ok, model_opp, rng)
         }
     }
 
@@ -676,6 +718,45 @@ mod tests {
         apply_bias(&mut p, &acts, 3);
         assert!(p[2] > 0.3 && p[3] > 0.3, "raise bias boosts bets+allin: {:?}", p);
         assert!(p[0] < 0.1);
+    }
+
+    /// RNR against an always-caller model: with no fold equity to exploit,
+    /// the near-pure best response must beat a calling station by clearly
+    /// more than the equilibrium strategy does at the same training budget.
+    #[test]
+    fn rnr_exploits_the_modeled_opponent() {
+        use crate::bot::Policy;
+        use crate::table::{run_eval, Baseline};
+
+        let train = |rnr: Option<RnrCfg>| {
+            let t = push_fold_trainer().with_rnr(rnr);
+            t.run(120_000, &|_| {});
+            let bp = t.to_blueprint();
+            let abs = Abstraction::with_centroids(bp.abs_cfg.clone(), bp.centroids.clone());
+            Policy::new(bp, Arc::new(abs))
+        };
+        let cfg = HandConfig {
+            num_players: 2,
+            stack: 1_000,
+            sb: 50,
+            bb: 100,
+        };
+        let nash = train(None);
+        let rnr = train(Some(RnrCfg {
+            model: Baseline::Caller,
+            p: 0.9,
+        }));
+        let w_nash = run_eval(&nash, &cfg, Baseline::Caller, 40_000, 5);
+        let w_rnr = run_eval(&rnr, &cfg, Baseline::Caller, 40_000, 5);
+        assert!(
+            w_rnr.mbb_per_hand > w_nash.mbb_per_hand + 50.0,
+            "RNR(caller, 0.9) must exploit a caller more than equilibrium: \
+             rnr {:+.0}±{:.0} vs nash {:+.0}±{:.0}",
+            w_rnr.mbb_per_hand,
+            w_rnr.ci95,
+            w_nash.mbb_per_hand,
+            w_nash.ci95
+        );
     }
 
     #[test]
