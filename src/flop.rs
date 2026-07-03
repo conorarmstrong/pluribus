@@ -332,6 +332,25 @@ impl<'a> FlopSolver<'a> {
         }
     }
 
+    /// Metareasoning staged solve (see `RiverSolver::solve_adaptive`).
+    pub fn solve_adaptive(
+        &mut self,
+        max_iters: u64,
+        time_ms: u64,
+        hole: [Card; 2],
+        threshold: f64,
+    ) -> bool {
+        const PROBE_FRAC: u64 = 8;
+        self.solve((max_iters / PROBE_FRAC).max(1), (time_ms / PROBE_FRAC).max(1));
+        if let Some((_, s)) = self.root_strategy(hole) {
+            if s.iter().cloned().fold(0.0, f64::max) >= threshold {
+                return true;
+            }
+        }
+        self.solve(max_iters, time_ms.saturating_sub(time_ms / PROBE_FRAC));
+        false
+    }
+
     pub fn root_strategy(&self, hole: [Card; 2]) -> Option<(Vec<AbsAction>, Vec<f64>)> {
         let node = &self.nodes[self.root()];
         debug_assert_eq!(node.player, 0);

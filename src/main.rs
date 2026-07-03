@@ -99,6 +99,10 @@ enum Cmd {
         /// values — bounds exploitation when tracked ranges are wrong.
         #[arg(long)]
         safe_resolve: bool,
+        /// Metareasoning: probe-solve first and exit early on decisions
+        /// that are already near-pure.
+        #[arg(long)]
+        adaptive_search: bool,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -323,6 +327,7 @@ fn main() {
             qre_lambda,
             value_net,
             safe_resolve,
+            adaptive_search,
             seed,
         } => {
             let net = value_net.map(|p| {
@@ -341,6 +346,7 @@ fn main() {
                     time_ms: search_ms,
                     qre_lambda,
                     safe_resolve,
+                    adaptive: adaptive_search,
                     ..SearchParams::default()
                 }),
                 seed,

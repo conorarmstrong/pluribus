@@ -248,6 +248,34 @@ impl RiverSolver {
         }
     }
 
+    /// Metareasoning staged solve: spend `PROBE_FRAC` of the time budget,
+    /// then stop early if `hole`'s root strategy is already near-pure
+    /// (max action probability ≥ `threshold`) — more compute cannot change
+    /// a decision that is already settled. Otherwise continue to the full
+    /// budget. Returns whether it exited early.
+    pub fn solve_adaptive(
+        &mut self,
+        max_iters: u64,
+        time_ms: u64,
+        qre_lambda: Option<f64>,
+        hole: [Card; 2],
+        threshold: f64,
+    ) -> bool {
+        const PROBE_FRAC: u64 = 8;
+        self.solve(
+            (max_iters / PROBE_FRAC).max(1),
+            (time_ms / PROBE_FRAC).max(1),
+            qre_lambda,
+        );
+        if let Some((_, s)) = self.root_strategy(hole) {
+            if s.iter().cloned().fold(0.0, f64::max) >= threshold {
+                return true;
+            }
+        }
+        self.solve(max_iters, time_ms.saturating_sub(time_ms / PROBE_FRAC), qre_lambda);
+        false
+    }
+
     /// Per-combo expected chip value at the root (counterfactual value
     /// normalized by compatible opponent mass; for player 1 this is the
     /// value of ENTERING the subgame).
@@ -851,6 +879,34 @@ mod tests {
             }
         }
         assert!(checked > 10);
+    }
+
+    /// Adaptive staging: a decision that is already pure after the probe
+    /// (the nuts facing a shove) exits early on a fraction of the iteration
+    /// budget; with an unreachable purity threshold it must run the full
+    /// budget instead.
+    #[test]
+    fn adaptive_solve_exits_early_only_when_pure() {
+        let (h, abs) = river_facing_shove();
+        let uni = vec![1.0; NUM_COMBOS];
+        let nuts = parse_cards("Ks 9s").unwrap();
+
+        let mut quick = RiverSolver::build(&h, &abs, [&uni, &uni]).unwrap();
+        let early = quick.solve_adaptive(400, 60_000, None, [nuts[0], nuts[1]], 0.97);
+        assert!(early, "nuts facing a shove must be settled by the probe");
+        assert!(
+            quick.iterations() < 100,
+            "early exit must not burn the budget, used {}",
+            quick.iterations()
+        );
+
+        let mut full = RiverSolver::build(&h, &abs, [&uni, &uni]).unwrap();
+        let early = full.solve_adaptive(400, 60_000, None, [nuts[0], nuts[1]], 1.01);
+        assert!(!early, "impossible threshold can never exit early");
+        assert_eq!(full.iterations(), 400, "must run the full budget");
+        // Same action either way.
+        let (_, s) = quick.root_strategy([nuts[0], nuts[1]]).unwrap();
+        assert!(s[1] > 0.9, "probe solve already calls: {s:?}");
     }
 
     /// lambda = 0 models a uniform-random opponent (folds to bets far too

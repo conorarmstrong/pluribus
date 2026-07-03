@@ -40,6 +40,10 @@ pub struct SearchParams {
     /// safety value instead of entering the subgame, bounding how much
     /// resolving with wrong beliefs can be exploited.
     pub safe_resolve: bool,
+    /// Metareasoning: probe with 1/8 of the budget and stop early when the
+    /// hero's decision is already near-pure — trivial spots take
+    /// milliseconds, the saved time is available to hard ones.
+    pub adaptive: bool,
 }
 
 impl Default for SearchParams {
@@ -49,9 +53,13 @@ impl Default for SearchParams {
             max_iters: 2_000_000,
             qre_lambda: None,
             safe_resolve: false,
+            adaptive: false,
         }
     }
 }
+
+/// Early-exit purity threshold for adaptive search.
+const ADAPTIVE_PURITY: f64 = 0.97;
 
 impl Policy {
     pub fn new(blueprint: Blueprint, abs: Arc<Abstraction>) -> Self {
@@ -176,7 +184,11 @@ impl Policy {
             net_ref,
             25,
         )?;
-        solver.solve(10_000, params.time_ms);
+        if params.adaptive {
+            solver.solve_adaptive(10_000, params.time_ms, h.hole(hero), ADAPTIVE_PURITY);
+        } else {
+            solver.solve(10_000, params.time_ms);
+        }
         let (acts, s) = solver.root_strategy(h.hole(hero))?;
         Some(acts[sample_index(&s, rng)])
     }
@@ -205,7 +217,17 @@ impl Policy {
             let alt = self.estimate_river_alt(h, hist, tracker, villain, rng);
             solver = solver.with_gadget(alt);
         }
-        solver.solve(10_000, params.time_ms, params.qre_lambda);
+        if params.adaptive {
+            solver.solve_adaptive(
+                10_000,
+                params.time_ms,
+                params.qre_lambda,
+                h.hole(hero),
+                ADAPTIVE_PURITY,
+            );
+        } else {
+            solver.solve(10_000, params.time_ms, params.qre_lambda);
+        }
         let (acts, s) = solver.root_strategy(h.hole(hero))?;
         Some(acts[sample_index(&s, rng)])
     }
@@ -469,6 +491,7 @@ mod tests {
                 max_iters: 20_000,
                 qre_lambda: None,
                 safe_resolve: false,
+                adaptive: false,
             },
             None,
             None,
@@ -564,6 +587,7 @@ mod tests {
                 max_iters: 300,
                 qre_lambda: None,
                 safe_resolve: true,
+                adaptive: false,
             },
             &train_cfg,
             Some(&tracker),
@@ -621,6 +645,7 @@ mod tests {
                 max_iters: 3_000,
                 qre_lambda: None,
                 safe_resolve: false,
+                adaptive: false,
             },
             Some(&tracker),
             Some(LeafCfg {
