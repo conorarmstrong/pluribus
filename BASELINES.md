@@ -101,3 +101,51 @@ the BR probe number down measurably on this same seed.
   or add duplicate dealing to the probe before reading small deltas.
 - The probes measure the RAW blueprint. Online search is not probed yet;
   Phase 1 should add a `br`-vs-search mode.
+
+## 2026-07-03 — Phase 1a/1b: nested re-solving + continual resolving
+
+- Code: commits `266ae46` (nested re-solving), `7558f04` (continual
+  resolving), `b49bd3a`/`0f274d8` (distill infra)
+- Tests at time of record: 103/103 passing
+
+Changes to table play: subgames root at the REAL state (off-tree bets
+priced at actual size); turn decisions with two live players use the
+exact turn+river vector solver (slim menu) instead of sampled MCCFR;
+turn resolves run inside the Burch gadget under `--safe-resolve` and
+carry opponent river-entry CFVs into the river gadget (SearchSession).
+
+| Metric | Value | Command |
+|--------|-------|---------|
+| Search gain w/o net, exact turn solving | +30.1 ±128.8 mbb/hand (40k paired deals, 800ms, 530s) | `eval --blueprint blueprint.bin --search-gain --hands 40000 --search-ms 800 --seed 3` |
+
+Reading: no-net search stays statistically zero against blueprint tables
+even with exact turn solving (prior record: −55 ±495 at 12k deals). The
+learned leaf values remain what makes search pay; flywheel distillation
+therefore uses net-search as the teacher. Note the off-tree pricing fix
+(1a) cannot show in this metric — all self-play actions are on-menu; the
+off-tree probe (task list) is the instrument for that.
+
+## 2026-07-03 — Phase 2 gen1: POLICY distillation is a clear negative
+
+- `distill --blueprint blueprint.bin --out bp_gen1.bin --hands 10000
+  --search-ms 800 --alpha 0.5 --value-net value_net.bin --seed 1`
+- 15,730 searched decisions distilled into 9,442 infosets (868s)
+
+| Gate | Result | Reference |
+|------|--------|-----------|
+| BR probe on gen1 (`--hands 20000 --seed 1`) | **+1306.3 ±348.9 mbb/hand** | gen0: +475.4 ±320.6 |
+| Crossplay gen1 vs gen0 (200k hands) | +82.2 ±137.9 (≈0) | — |
+
+Verdict: FAIL — do not adopt. Resolved distributions are near-pure best
+responses to tracked ranges; blending them at α=0.5 (often one sample
+per infoset) plants deterministic, exploitable strategies on the most
+common lines. Exploitability lower bound ~2.8×; no head-to-head gain.
+This is the known theoretical failure mode of policy-space expert
+iteration in imperfect-information games, caught by the Phase 0 metric.
+ReBeL distills VALUES for exactly this reason. bp_gen1.bin kept on disk
+for forensics; not hashed as a baseline artifact.
+
+Follow-ups worth testing before abandoning policy space entirely:
+low α (≤0.1) + minimum-sample thresholds per key. Primary path forward:
+value-space flywheel (regenerate turn data under current search
+conditions, retrain/scale the net).
