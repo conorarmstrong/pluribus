@@ -11,6 +11,7 @@
 //! equilibrium-convergence guarantee — it is an empirical bet, gated by
 //! the BR probe, cross-play vs the parent, and baseline winrates.
 
+use crate::abstraction::AbsAction;
 use crate::bot::{Policy, SearchParams, SearchSession};
 use crate::cards::fresh_deck;
 use crate::cfr::{make_key, Blueprint};
@@ -33,6 +34,32 @@ pub struct DistillCfg {
 
 /// Accumulated teacher signal: infoset key → (summed distribution, count).
 type Records = DashMap<Vec<u8>, (Vec<f64>, f64)>;
+
+/// Re-express a solver distribution over `slim` actions on the `full`
+/// blueprint menu, matching actions by identity (mass on actions the full
+/// menu lacks is dropped and the rest renormalized). None when no mass
+/// survives. The slim-menu solvers (turn, flop-net) return distributions
+/// shorter than the blueprint's stored entries; recording them unaligned
+/// would corrupt the blueprint (a length-mismatched entry falls back to
+/// pure check/call at play time).
+pub fn expand_dist(slim: &[AbsAction], dist: &[f64], full: &[AbsAction]) -> Option<Vec<f64>> {
+    debug_assert_eq!(slim.len(), dist.len());
+    let mut out = vec![0.0; full.len()];
+    let mut kept = 0.0;
+    for (a, &p) in slim.iter().zip(dist) {
+        if let Some(i) = full.iter().position(|f| f == a) {
+            out[i] += p;
+            kept += p;
+        }
+    }
+    if kept <= 0.0 {
+        return None;
+    }
+    for o in &mut out {
+        *o /= kept;
+    }
+    Some(out)
+}
 
 /// Self-play `hands` hands with every seat searching, recording resolved
 /// distributions at searched postflop decisions. Returns the accumulated
@@ -76,21 +103,27 @@ pub fn collect(policy: &Policy, cfg: &HandConfig, dcfg: &DistillCfg) -> (Records
                 );
                 if table.real.street() != Street::Preflop {
                     // Preflop is pure blueprint (no teacher there); record
-                    // every searched postflop distribution.
-                    let mut krng = SmallRng::seed_from_u64(0xD157_5EED);
-                    let bucket = policy.abs.bucket(
-                        table.real.hole(p),
-                        table.real.board(),
-                        &mut krng,
-                    );
-                    let key = make_key(bucket, &table.hist).to_vec();
-                    let mut e = records.entry(key).or_insert((vec![0.0; probs.len()], 0.0));
-                    if e.0.len() == probs.len() {
-                        for (a, &x) in e.0.iter_mut().zip(&probs) {
-                            *a += x;
+                    // every searched postflop distribution, re-expressed on
+                    // the full blueprint menu (slim-menu solvers return
+                    // shorter vectors).
+                    let full = policy.abs.abstract_actions(&table.real);
+                    if let Some(expanded) = expand_dist(&acts, &probs, &full) {
+                        let mut krng = SmallRng::seed_from_u64(0xD157_5EED);
+                        let bucket = policy.abs.bucket(
+                            table.real.hole(p),
+                            table.real.board(),
+                            &mut krng,
+                        );
+                        let key = make_key(bucket, &table.hist).to_vec();
+                        let mut e =
+                            records.entry(key).or_insert((vec![0.0; expanded.len()], 0.0));
+                        if e.0.len() == expanded.len() {
+                            for (a, &x) in e.0.iter_mut().zip(&expanded) {
+                                *a += x;
+                            }
+                            e.1 += 1.0;
+                            count += 1;
                         }
-                        e.1 += 1.0;
-                        count += 1;
                     }
                 }
                 let a = acts[crate::cfr::sample_index(&probs, &mut rng)];
@@ -111,11 +144,13 @@ pub fn collect(policy: &Policy, cfg: &HandConfig, dcfg: &DistillCfg) -> (Records
 /// (taken by value: a multi-GB blueprint must not be cloned): at each
 /// recorded key, `new = (1-alpha)·old + alpha·mean(search)` (both
 /// normalized first). Keys the blueprint never visited are inserted
-/// outright; length-mismatched entries (menu drift) are overwritten with
-/// the search distribution. Returns the blueprint and how many keys
-/// changed.
-pub fn merge(mut bp: Blueprint, records: &Records, alpha: f64) -> (Blueprint, u64) {
+/// outright. Length-mismatched entries are SKIPPED, never overwritten —
+/// a shorter entry falls back to pure check/call at play time, which is
+/// exactly the corruption that sank the first flywheel generation.
+/// Returns the blueprint, keys changed, and keys skipped on mismatch.
+pub fn merge(mut bp: Blueprint, records: &Records, alpha: f64) -> (Blueprint, u64, u64) {
     let mut updated = 0u64;
+    let mut skipped = 0u64;
     for e in records.iter() {
         let (sum, count) = e.value();
         if *count <= 0.0 {
@@ -134,12 +169,16 @@ pub fn merge(mut bp: Blueprint, records: &Records, alpha: f64) -> (Blueprint, u6
                     mean.iter().map(|&m| m as f32).collect()
                 }
             }
-            _ => mean.iter().map(|&m| m as f32).collect(),
+            Some(_) => {
+                skipped += 1;
+                continue;
+            }
+            None => mean.iter().map(|&m| m as f32).collect(),
         };
         bp.strategies.insert(e.key().clone(), blended);
         updated += 1;
     }
-    (bp, updated)
+    (bp, updated, skipped)
 }
 
 // ---------------------------------------------------------------------------
@@ -154,11 +193,11 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn merge_blends_inserts_and_overwrites() {
+    fn merge_blends_inserts_and_skips_mismatches() {
         let mut strategies = HashMap::new();
         // Existing key, matching length, unnormalized on purpose.
         strategies.insert(vec![1u8], vec![3.0f32, 1.0]); // normalizes to .75/.25
-        // Existing key with a stale menu length.
+        // Existing key whose stored menu length differs from the record.
         strategies.insert(vec![2u8], vec![1.0f32, 1.0, 1.0]);
         let old = Blueprint {
             strategies,
@@ -170,23 +209,42 @@ mod tests {
         let records: Records = DashMap::new();
         // Two samples at key 1 averaging to (0.25, 0.75).
         records.insert(vec![1u8], (vec![0.5, 1.5], 2.0));
-        // One sample at the stale key (new menu has 2 actions).
+        // One sample at the mismatched key (record has 2 actions).
         records.insert(vec![2u8], (vec![0.9, 0.1], 1.0));
         // A brand-new key.
         records.insert(vec![3u8], (vec![0.6, 0.4], 1.0));
 
-        let (bp, updated) = merge(old, &records, 0.5);
-        assert_eq!(updated, 3);
+        let (bp, updated, skipped) = merge(old, &records, 0.5);
+        assert_eq!(updated, 2);
+        assert_eq!(skipped, 1, "length mismatches are skipped, never overwritten");
         let s1 = &bp.strategies[&vec![1u8]];
         assert!((s1[0] - 0.5).abs() < 1e-6, "0.5·0.75 + 0.5·0.25 = 0.5, got {}", s1[0]);
         assert!((s1[1] - 0.5).abs() < 1e-6);
         let s2 = &bp.strategies[&vec![2u8]];
-        assert_eq!(s2.len(), 2, "stale-length entries are overwritten");
-        assert!((s2[0] - 0.9).abs() < 1e-6);
+        assert_eq!(s2.len(), 3, "mismatched entry must be left intact");
+        assert_eq!(s2[0], 1.0f32);
         let s3 = &bp.strategies[&vec![3u8]];
         assert!((s3[0] - 0.6).abs() < 1e-6);
         // Metadata preserved.
         assert_eq!(bp.iterations, 7);
+    }
+
+    /// Slim-menu solver distributions must re-express exactly onto the
+    /// full blueprint menu by action identity.
+    #[test]
+    fn expand_dist_aligns_by_action_identity() {
+        use crate::abstraction::AbsAction::*;
+        let full = vec![Fold, CheckCall, Bet(2), Bet(3), Bet(4), AllIn];
+        let slim = vec![Fold, CheckCall, Bet(3), AllIn];
+        let d = expand_dist(&slim, &[0.1, 0.4, 0.3, 0.2], &full).unwrap();
+        assert_eq!(d, vec![0.1, 0.4, 0.0, 0.3, 0.0, 0.2]);
+
+        // Mass on actions the full menu lacks is dropped and renormalized.
+        let slim2 = vec![CheckCall, Bet(7)];
+        let d2 = expand_dist(&slim2, &[0.5, 0.5], &full).unwrap();
+        assert!((d2[1] - 1.0).abs() < 1e-12);
+        // No surviving mass → None.
+        assert!(expand_dist(&[Bet(7)], &[1.0], &full).is_none());
     }
 
     /// End to end on a tiny blueprint: collection records searched postflop
@@ -235,12 +293,18 @@ mod tests {
         assert!(samples > 0, "self-play must record searched decisions");
         let n_before = policy.blueprint.strategies.len();
         let owned = (*policy.blueprint).clone();
-        let (bp2, updated) = merge(owned, &records, dcfg.alpha);
+        let (bp2, updated, skipped) = merge(owned, &records, dcfg.alpha);
         assert!(updated > 0);
+        assert_eq!(
+            skipped, 0,
+            "collect-time expansion must leave nothing length-mismatched"
+        );
         assert!(bp2.strategies.len() >= n_before);
-        // Every recorded key's entry is a valid distribution.
+        // Every recorded key's entry is a valid distribution of the same
+        // length as the record (nothing corrupted by menu mismatch).
         for e in records.iter() {
             let s = &bp2.strategies[e.key()];
+            assert_eq!(s.len(), e.value().0.len());
             let total: f32 = s.iter().sum();
             assert!((total - 1.0).abs() < 1e-3, "must normalize, got {total}");
             assert!(s.iter().all(|&x| (0.0..=1.0).contains(&x)));

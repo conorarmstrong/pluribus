@@ -768,11 +768,12 @@ fn main() {
             let bot::Policy { blueprint: bp_arc, .. } = policy;
             let owned = Arc::try_unwrap(bp_arc)
                 .unwrap_or_else(|arc| (*arc).clone());
-            let (bp2, updated) = distill::merge(owned, &records, alpha);
+            let (bp2, updated, skipped) = distill::merge(owned, &records, alpha);
             bp2.save(&out)
                 .unwrap_or_else(|e| die(&format!("save failed: {e}")));
             println!(
-                "updated {updated} infosets; distilled blueprint saved to {out} ({} strategies)",
+                "updated {updated} infosets ({skipped} skipped on menu mismatch); \
+                 distilled blueprint saved to {out} ({} strategies)",
                 bp2.strategies.len()
             );
             println!("gate it: br/lbr, crossplay --focal {out} --field {blueprint}, eval");
