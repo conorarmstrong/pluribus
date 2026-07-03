@@ -69,6 +69,12 @@ enum Cmd {
         /// Use raw-equity bucketing instead of EMD k-means clustering.
         #[arg(long)]
         raw_buckets: bool,
+        /// Strategy-aware co-training: cluster hands by how THIS previous
+        /// blueprint plays and realizes them, instead of by equity
+        /// distributions. The resulting blueprint must be loaded with
+        /// --strat-prev pointing at the same file.
+        #[arg(long)]
+        strategic_from: Option<String>,
         /// Disable negative-regret pruning.
         #[arg(long)]
         no_prune: bool,
@@ -144,6 +150,9 @@ enum Cmd {
         /// Belief-state value net for ReBeL flop solving (with --search).
         #[arg(long)]
         value_net: Option<String>,
+        /// Previous blueprint for strategic-abstraction lookups.
+        #[arg(long)]
+        strat_prev: Option<String>,
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
@@ -157,6 +166,9 @@ enum Cmd {
         /// Board completions sampled per equity estimate.
         #[arg(long, default_value_t = 100)]
         runouts: u32,
+        /// Previous blueprint for strategic-abstraction lookups.
+        #[arg(long)]
+        strat_prev: Option<String>,
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
@@ -235,6 +247,7 @@ fn main() {
             runouts,
             kmeans_samples,
             raw_buckets,
+            strategic_from,
             no_prune,
             threads,
         } => {
@@ -270,7 +283,17 @@ fn main() {
                     t
                 }
                 None => {
-                    let centroids = if raw_buckets {
+                    let strat_ctx = strategic_from.as_ref().map(|p| load_strat_ctx(p));
+                    let centroids = if let Some(sc) = &strat_ctx {
+                        println!(
+                            "training STRATEGIC centroids from previous blueprint \
+                             ({buckets} buckets, {kmeans_samples} samples/street)..."
+                        );
+                        let t0 = std::time::Instant::now();
+                        let c = Centroids::train_strategic(&abs_cfg, kmeans_samples, 0xC1A5, sc);
+                        println!("centroids trained in {:.1}s", t0.elapsed().as_secs_f64());
+                        Some(c)
+                    } else if raw_buckets {
                         None
                     } else {
                         println!(
@@ -282,10 +305,11 @@ fn main() {
                         println!("centroids trained in {:.1}s", t0.elapsed().as_secs_f64());
                         Some(c)
                     };
-                    Trainer::new(
-                        Arc::new(Abstraction::with_centroids(abs_cfg, centroids)),
-                        train_cfg,
-                    )
+                    let mut abs = Abstraction::with_centroids(abs_cfg, centroids);
+                    if let Some(sc) = strat_ctx {
+                        abs = abs.with_strat(sc);
+                    }
+                    Trainer::new(Arc::new(abs), train_cfg)
                 }
             };
 
@@ -385,6 +409,7 @@ fn main() {
             net_gain,
             search_ms,
             value_net,
+            strat_prev,
             seed,
         } => {
             let net = value_net.map(|p| {
@@ -393,7 +418,8 @@ fn main() {
                 println!("loaded value net from {p}");
                 Arc::new(n)
             });
-            let policy = load_policy(&blueprint).with_value_net(net);
+            let policy =
+                load_policy_strat(&blueprint, strat_prev.as_deref()).with_value_net(net);
             let cfg = HandConfig {
                 num_players: players,
                 ..HandConfig::default()
@@ -461,9 +487,10 @@ fn main() {
             blueprint,
             hands,
             runouts,
+            strat_prev,
             seed,
         } => {
-            let policy = load_policy(&blueprint);
+            let policy = load_policy_strat(&blueprint, strat_prev.as_deref());
             let cfg = HandConfig {
                 num_players: policy.blueprint.num_players,
                 ..HandConfig::default()
@@ -664,24 +691,58 @@ fn print_bench_row(name: &str, s: &benchmark::StreetStats) {
     );
 }
 
+/// Previous-round context for strategic abstractions. The referenced
+/// blueprint must itself use an equity abstraction (one co-training level).
+fn load_strat_ctx(path: &str) -> abstraction::StratCtx {
+    let bp = Blueprint::load(path)
+        .unwrap_or_else(|e| die(&format!("cannot load previous blueprint '{path}': {e}")));
+    if bp.centroids.as_ref().is_some_and(|c| c.is_strategic()) {
+        die("chained strategic blueprints are not supported: the previous blueprint must use an equity abstraction");
+    }
+    println!(
+        "previous blueprint for strategic fingerprints: {} infosets ({} buckets)",
+        bp.strategies.len(),
+        bp.abs_cfg.postflop_buckets
+    );
+    let abs = Abstraction::with_centroids(bp.abs_cfg.clone(), bp.centroids.clone());
+    abstraction::StratCtx {
+        bp: Arc::new(bp),
+        abs: Arc::new(abs),
+        rollouts: 16,
+    }
+}
+
 fn load_policy(path: &str) -> Policy {
+    load_policy_strat(path, None)
+}
+
+fn load_policy_strat(path: &str, strat_prev: Option<&str>) -> Policy {
     let bp = Blueprint::load(path).unwrap_or_else(|e| {
         die(&format!(
             "cannot load blueprint '{path}': {e}\nrun `pluribus train --out {path}` first"
         ))
     });
+    let strategic = bp.centroids.as_ref().is_some_and(|c| c.is_strategic());
     println!(
         "loaded blueprint: {} infosets from {} iterations ({} card buckets, {})",
         bp.strategies.len(),
         bp.iterations,
         bp.abs_cfg.postflop_buckets,
-        if bp.centroids.is_some() {
+        if strategic {
+            "STRATEGIC clustering"
+        } else if bp.centroids.is_some() {
             "EMD k-means"
         } else {
             "raw equity"
         }
     );
-    let abs = Abstraction::with_centroids(bp.abs_cfg.clone(), bp.centroids.clone());
+    let mut abs = Abstraction::with_centroids(bp.abs_cfg.clone(), bp.centroids.clone());
+    if strategic {
+        let prev = strat_prev.unwrap_or_else(|| {
+            die("this blueprint uses strategic clustering: pass --strat-prev <previous blueprint>")
+        });
+        abs = abs.with_strat(load_strat_ctx(prev));
+    }
     Policy::new(bp, Arc::new(abs))
 }
 

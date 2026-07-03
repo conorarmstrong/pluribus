@@ -13,6 +13,7 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Pot-fraction bet sizes, in percent of (pot + amount to call).
 pub const BET_SIZES: [u16; 8] = [25, 33, 50, 75, 100, 150, 200, 300];
@@ -72,9 +73,13 @@ impl Default for AbsConfig {
     }
 }
 
-/// K-medians cluster centers over equity-distribution quantile vectors,
-/// one set per street. Trained once before blueprint training and persisted
-/// with the blueprint so play-time bucketing matches training exactly.
+/// K-medians cluster centers, one set per street. Two feature families
+/// share this container, self-described by vector dimension:
+/// - equity-distribution quantiles (dimension == QUANTILES), or
+/// - strategic fingerprints from a previous blueprint (any other dimension:
+///   prior policy's action distribution + rollout value statistics).
+/// Trained once before blueprint training and persisted with the blueprint
+/// so play-time bucketing matches training exactly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Centroids {
     pub flop: Vec<Vec<f32>>,
@@ -91,6 +96,173 @@ impl Centroids {
             turn: train_street_centroids(cfg, 4, samples, seed ^ 0x5EED_5EED),
         }
     }
+
+    /// Strategy-aware abstraction co-training: cluster hands by how the
+    /// PREVIOUS blueprint plays and realizes them (strategic fingerprints)
+    /// instead of by their equity distributions. `cfg` is the NEW
+    /// abstraction's configuration (bucket count).
+    pub fn train_strategic(cfg: &AbsConfig, samples: usize, seed: u64, sc: &StratCtx) -> Centroids {
+        Centroids {
+            flop: train_street_strategic(cfg, 3, samples, seed, sc),
+            turn: train_street_strategic(cfg, 4, samples, seed ^ 0x5EED_5EED, sc),
+        }
+    }
+
+    /// Strategic centroids are recognized by their feature dimension.
+    pub fn is_strategic(&self) -> bool {
+        self.flop.first().map(|v| v.len()) != Some(QUANTILES)
+    }
+}
+
+/// Context for strategic fingerprints: the previous co-training round's
+/// blueprint and its abstraction.
+pub struct StratCtx {
+    pub bp: Arc<crate::cfr::Blueprint>,
+    pub abs: Arc<Abstraction>,
+    /// Self-play rollouts per fingerprint.
+    pub rollouts: u32,
+}
+
+/// A hand's strategic fingerprint at a standardized heads-up limped-pot
+/// street start: the previous policy's action distribution with this hand,
+/// plus mean / std / win-fraction of its blueprint-vs-blueprint rollout
+/// values — "what the trained policy does with the hand and what it earns",
+/// rather than raw equity. Suit-isomorphism invariant (the previous
+/// abstraction's buckets are, and rollouts are distributionally symmetric).
+pub fn strategic_fingerprint(
+    sc: &StratCtx,
+    hole: [Card; 2],
+    board: &[Card],
+    rng: &mut SmallRng,
+) -> Vec<f32> {
+    let (h0, hist) = standard_state(hole, board);
+    let acts = sc.abs.abstract_actions(&h0);
+    let bucket = sc.abs.bucket(hole, board, rng);
+    let mut feat: Vec<f32> = match sc.bp.get(bucket, &hist) {
+        Some(s) if s.len() == acts.len() && s.iter().sum::<f32>() > 0.0 => {
+            let total: f32 = s.iter().sum();
+            s.iter().map(|&x| x / total).collect()
+        }
+        _ => vec![1.0 / acts.len() as f32; acts.len()],
+    };
+
+    let hero = h0.to_act();
+    let mut vals = Vec::with_capacity(sc.rollouts as usize);
+    let mut wins = 0u32;
+    for _ in 0..sc.rollouts {
+        let mut sim = h0.clone();
+        let mut want: [Option<[Card; 2]>; crate::engine::MAX_PLAYERS] =
+            [None; crate::engine::MAX_PLAYERS];
+        want[hero] = Some(hole);
+        sim.resample_hidden_with(&want, rng);
+        let mut hist2 = hist.clone();
+        let mut guard = 0;
+        while !sim.is_terminal() && guard < 60 {
+            guard += 1;
+            let p_acts = sc.abs.abstract_actions(&sim);
+            let b = sc.abs.bucket(sim.hole(sim.to_act()), sim.board(), rng);
+            let a = match sc.bp.get(b, &hist2) {
+                Some(s) if s.len() == p_acts.len() && s.iter().sum::<f32>() > 0.0 => {
+                    let probs: Vec<f64> = s.iter().map(|&x| x as f64).collect();
+                    let total: f64 = probs.iter().sum();
+                    let norm: Vec<f64> = probs.iter().map(|x| x / total).collect();
+                    p_acts[crate::cfr::sample_index(&norm, rng)]
+                }
+                _ => AbsAction::CheckCall,
+            };
+            let street_before = sim.street();
+            sim.apply(sc.abs.concrete(&sim, a));
+            hist2.push(a.token());
+            if !sim.is_terminal() && sim.street() != street_before {
+                hist2.push(TOKEN_STREET_SEP);
+            }
+        }
+        if sim.is_terminal() {
+            let u = sim.utilities()[hero] as f64;
+            if u > 0.0 {
+                wins += 1;
+            }
+            vals.push(u);
+        }
+    }
+    let n = vals.len().max(1) as f64;
+    let mean = vals.iter().sum::<f64>() / n;
+    let var = vals.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+    feat.push(((mean / 2_000.0) as f32).clamp(-2.0, 2.0));
+    feat.push(((var.sqrt() / 2_000.0) as f32).clamp(0.0, 2.0));
+    feat.push(wins as f32 / sc.rollouts.max(1) as f32);
+    feat
+}
+
+/// Standardized heads-up limped-pot state at this street start (hero =
+/// first to act) with the given hole/board, plus its history tokens.
+fn standard_state(hole: [Card; 2], board: &[Card]) -> (crate::engine::Hand, Vec<u8>) {
+    debug_assert!(board.len() == 3 || board.len() == 4);
+    let cfg = crate::engine::HandConfig {
+        num_players: 2,
+        stack: 10_000,
+        sb: 50,
+        bb: 100,
+    };
+    let mut used = [false; 52];
+    used[hole[0] as usize] = true;
+    used[hole[1] as usize] = true;
+    for &c in board {
+        used[c as usize] = true;
+    }
+    let mut free = (0..52u8).filter(|&c| !used[c as usize]);
+    let mut deck = [0u8; 52];
+    // p0 = dummy villain (resampled per rollout), p1 = hero (first to act
+    // postflop heads-up), board at deck[4..9].
+    deck[0] = free.next().unwrap();
+    deck[1] = free.next().unwrap();
+    deck[2] = hole[0];
+    deck[3] = hole[1];
+    for (i, &c) in board.iter().enumerate() {
+        deck[4 + i] = c;
+    }
+    let mut next = 4 + board.len();
+    for c in free {
+        deck[next] = c;
+        next += 1;
+    }
+    let mut h = crate::engine::Hand::new(&cfg, 0, deck);
+    let mut hist = Vec::with_capacity(8);
+    let mut limp_check = |h: &mut crate::engine::Hand, hist: &mut Vec<u8>| {
+        for _ in 0..2 {
+            h.apply(crate::engine::PlayerAction::CheckCall);
+            hist.push(AbsAction::CheckCall.token());
+        }
+        hist.push(TOKEN_STREET_SEP);
+    };
+    limp_check(&mut h, &mut hist); // limp + check -> flop
+    if board.len() == 4 {
+        limp_check(&mut h, &mut hist); // check-check -> turn
+    }
+    debug_assert_eq!(h.board().len(), board.len());
+    (h, hist)
+}
+
+fn train_street_strategic(
+    cfg: &AbsConfig,
+    board_len: usize,
+    samples: usize,
+    seed: u64,
+    sc: &StratCtx,
+) -> Vec<Vec<f32>> {
+    let points: Vec<Vec<f32>> = (0..samples)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng =
+                SmallRng::seed_from_u64(seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut deck = fresh_deck();
+            deck.shuffle(&mut rng);
+            let hole = [deck[0], deck[1]];
+            let board = deck[2..2 + board_len].to_vec();
+            strategic_fingerprint(sc, hole, &board, &mut rng)
+        })
+        .collect();
+    kmedians(&points, cfg.postflop_buckets as usize, 25, seed)
 }
 
 fn train_street_centroids(
@@ -124,6 +296,8 @@ pub struct Abstraction {
     /// expensive Monte Carlo work runs once per isomorphism class (up to
     /// 24 suit relabelings share one entry).
     canon: DashMap<u64, u16, ahash::RandomState>,
+    /// Previous-round context, required when `centroids.is_strategic()`.
+    strat: Option<StratCtx>,
 }
 
 impl Abstraction {
@@ -139,7 +313,15 @@ impl Abstraction {
             centroids,
             cache: DashMap::with_hasher(ahash::RandomState::new()),
             canon: DashMap::with_hasher(ahash::RandomState::new()),
+            strat: None,
         }
+    }
+
+    /// Attach the previous-round blueprint context needed to evaluate
+    /// strategic fingerprints at cache misses.
+    pub fn with_strat(mut self, sc: StratCtx) -> Self {
+        self.strat = Some(sc);
+        self
     }
 
     /// Bet-size menu (indices into BET_SIZES) for a street and raise count.
@@ -249,6 +431,13 @@ impl Abstraction {
             _ => None,
         };
         let b = match street_cents {
+            Some(cents) if cents.first().map(|v| v.len()) != Some(QUANTILES) => {
+                let sc = self.strat.as_ref().expect(
+                    "strategic centroids need the previous blueprint (--strat-prev)",
+                );
+                let f = strategic_fingerprint(sc, hole, board, rng);
+                nearest_centroid(&f, cents)
+            }
             Some(cents) => {
                 let q = equity_quantiles(
                     hole,
@@ -460,7 +649,7 @@ pub(crate) fn l1(a: &[f32], b: &[f32]) -> f64 {
         .sum()
 }
 
-fn nearest_centroid(q: &[f32; QUANTILES], cents: &[Vec<f32>]) -> u16 {
+fn nearest_centroid(q: &[f32], cents: &[Vec<f32>]) -> u16 {
     let mut best = 0u16;
     let mut best_d = f64::MAX;
     for (i, c) in cents.iter().enumerate() {
@@ -860,6 +1049,86 @@ mod tests {
         let ba = a.bucket([air[0], air[1]], &board, &mut rng);
         assert!(bs > ba, "top set bucket {} must beat air bucket {}", bs, ba);
         // Cache stability.
+        assert_eq!(bs, a.bucket([set[1], set[0]], &board, &mut rng));
+    }
+
+    fn small_strat_ctx() -> StratCtx {
+        let abs = Arc::new(Abstraction::new(AbsConfig {
+            postflop_buckets: 6,
+            equity_rollouts: 40,
+            dist_runouts: 8,
+            runout_rollouts: 20,
+            cache_cap: 500_000,
+        }));
+        let cfg = crate::cfr::TrainConfig {
+            hand: HandConfig {
+                num_players: 2,
+                ..HandConfig::default()
+            },
+            prune_after: u64::MAX,
+            ..crate::cfr::TrainConfig::default()
+        };
+        let trainer = crate::cfr::Trainer::new(abs.clone(), cfg);
+        trainer.run(3_000, &|_| {});
+        StratCtx {
+            bp: Arc::new(trainer.to_blueprint()),
+            abs,
+            rollouts: 16,
+        }
+    }
+
+    /// Strategic fingerprints: fixed dimension per street (never QUANTILES,
+    /// so dimension-sniffing works), rollout value features order a monster
+    /// above air, and the whole vector is suit-relabeling stable enough to
+    /// share cache entries.
+    #[test]
+    fn strategic_fingerprint_shape_and_separation() {
+        let sc = small_strat_ctx();
+        let mut rng = SmallRng::seed_from_u64(9);
+        let board = parse_cards("Ah 7h 2c").unwrap();
+        let set = parse_cards("As Ad").unwrap();
+        let air = parse_cards("9c 4d").unwrap();
+        let f_set = strategic_fingerprint(&sc, [set[0], set[1]], &board, &mut rng);
+        let f_air = strategic_fingerprint(&sc, [air[0], air[1]], &board, &mut rng);
+        assert_eq!(f_set.len(), f_air.len());
+        assert_ne!(f_set.len(), QUANTILES, "dimension must not collide with equity features");
+        // Value features live in the last three slots: [mean, std, winfrac].
+        let n = f_set.len();
+        assert!(
+            f_set[n - 3] > f_air[n - 3] && f_set[n - 1] > f_air[n - 1],
+            "top set must out-earn air in blueprint rollouts: set {:?} air {:?}",
+            &f_set[n - 3..],
+            &f_air[n - 3..]
+        );
+        // Action-probability prefix is a distribution.
+        let p: f32 = f_set[..n - 3].iter().sum();
+        assert!((p - 1.0).abs() < 1e-4);
+    }
+
+    /// End to end: strategic centroids train, are recognized as strategic,
+    /// and an abstraction using them buckets hands without panicking while
+    /// separating monsters from air.
+    #[test]
+    fn strategic_centroids_bucket_hands() {
+        let sc = small_strat_ctx();
+        let cfg = AbsConfig {
+            postflop_buckets: 6,
+            cache_cap: 500_000,
+            ..AbsConfig::default()
+        };
+        let cents = Centroids::train_strategic(&cfg, 300, 7, &sc);
+        assert!(cents.is_strategic());
+        assert_eq!(cents.flop.len(), 6);
+        let a = Abstraction::with_centroids(cfg, Some(cents)).with_strat(sc);
+        let mut rng = SmallRng::seed_from_u64(31);
+        let board = parse_cards("Ah 7h 2c").unwrap();
+        let set = parse_cards("As Ad").unwrap();
+        let air = parse_cards("9c 4d").unwrap();
+        let bs = a.bucket([set[0], set[1]], &board, &mut rng);
+        let ba = a.bucket([air[0], air[1]], &board, &mut rng);
+        assert!(bs < 6 && ba < 6);
+        assert_ne!(bs, ba, "monster and air should land in different strategic buckets");
+        // Cache stability across the suit-symmetric lookup.
         assert_eq!(bs, a.bucket([set[1], set[0]], &board, &mut rng));
     }
 
