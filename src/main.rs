@@ -1,3 +1,4 @@
+mod ablate;
 mod abstraction;
 mod aivat;
 mod benchmark;
@@ -94,6 +95,10 @@ enum Cmd {
         /// Belief-state value net enabling ReBeL-style flop solving.
         #[arg(long)]
         value_net: Option<String>,
+        /// Safe (gadget) river resolving with rollout-estimated safety
+        /// values — bounds exploitation when tracked ranges are wrong.
+        #[arg(long)]
+        safe_resolve: bool,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -129,6 +134,16 @@ enum Cmd {
         /// Board completions sampled per equity estimate.
         #[arg(long, default_value_t = 100)]
         runouts: u32,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
+    /// Safety ablation: unsafe vs gadget river resolving under corrupted
+    /// range beliefs — reports best-response margins beyond safety values.
+    AblateSafety {
+        #[arg(long, default_value_t = 40)]
+        spots: usize,
+        #[arg(long, default_value_t = 400)]
+        iters: u64,
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
@@ -307,6 +322,7 @@ fn main() {
             search_ms,
             qre_lambda,
             value_net,
+            safe_resolve,
             seed,
         } => {
             let net = value_net.map(|p| {
@@ -324,6 +340,7 @@ fn main() {
                 search: search.then_some(SearchParams {
                     time_ms: search_ms,
                     qre_lambda,
+                    safe_resolve,
                     ..SearchParams::default()
                 }),
                 seed,
@@ -400,6 +417,29 @@ fn main() {
                 started.elapsed().as_secs_f64()
             );
             println!("(lower bound on the blueprint's exploitability; 0 = unexploited)");
+        }
+
+        Cmd::AblateSafety { spots, iters, seed } => {
+            println!(
+                "safety ablation: {spots} random river spots, {iters} CFR iters/solve..."
+            );
+            let started = std::time::Instant::now();
+            let rows = ablate::run(spots, iters, seed);
+            println!(
+                "\n{:<8} {:>13} {:>12} {:>11} {:>10} {:>9}",
+                "epsilon", "unsafe mean", "unsafe max", "safe mean", "safe max", "pot"
+            );
+            for r in rows {
+                println!(
+                    "{:<8} {:>13.1} {:>12.1} {:>11.1} {:>10.1} {:>9.0}",
+                    r.epsilon, r.unsafe_mean, r.unsafe_max, r.safe_mean, r.safe_max, r.pot
+                );
+            }
+            println!(
+                "\n(margins in chips: opponent best-response value beyond its safety \
+                 value,\n true-range weighted; {:.1}s)",
+                started.elapsed().as_secs_f64()
+            );
         }
 
         Cmd::GenTurnData {

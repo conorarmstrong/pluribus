@@ -36,6 +36,10 @@ pub struct SearchParams {
     /// Model opponents as lambda-rational (logit QRE) instead of fully
     /// rational. None = solve toward equilibrium (default).
     pub qre_lambda: Option<f64>,
+    /// Safe (gadget) river resolving: the opponent may take a blueprint
+    /// safety value instead of entering the subgame, bounding how much
+    /// resolving with wrong beliefs can be exploited.
+    pub safe_resolve: bool,
 }
 
 impl Default for SearchParams {
@@ -44,6 +48,7 @@ impl Default for SearchParams {
             time_ms: 2_000,
             max_iters: 2_000_000,
             qre_lambda: None,
+            safe_resolve: false,
         }
     }
 }
@@ -119,7 +124,7 @@ impl Policy {
         // (river.rs) instead of sampled MCCFR.
         if h.street() == Street::River && h.live_count() == 2 {
             if let Some(tr) = tracker {
-                if let Some(a) = self.act_river_exact(h, tr, params, rng) {
+                if let Some(a) = self.act_river_exact(h, hist, tr, params, rng) {
                     return a;
                 }
             }
@@ -178,10 +183,13 @@ impl Policy {
 
     /// Exact river resolve over both players' tracked ranges. None when the
     /// spot doesn't qualify or the hero's combo got no strategy weight, in
-    /// which case the caller falls back to sampled MCCFR.
+    /// which case the caller falls back to sampled MCCFR. With
+    /// `safe_resolve`, the solve runs the Burch resolving gadget using
+    /// rollout-estimated blueprint safety values for the opponent.
     fn act_river_exact(
         &self,
         h: &Hand,
+        hist: &[u8],
         tracker: &RangeTracker,
         params: SearchParams,
         rng: &mut SmallRng,
@@ -193,9 +201,102 @@ impl Policy {
             &self.abs,
             [tracker.seat_weights(hero), tracker.seat_weights(villain)],
         )?;
+        if params.safe_resolve {
+            let alt = self.estimate_river_alt(h, hist, tracker, villain, rng);
+            solver = solver.with_gadget(alt);
+        }
         solver.solve(10_000, params.time_ms, params.qre_lambda);
         let (acts, s) = solver.root_strategy(h.hole(hero))?;
         Some(acts[sample_index(&s, rng)])
+    }
+
+    /// Rollout-estimated safety values for the opponent: for each of its
+    /// combos, the mean utility of blueprint-vs-blueprint playouts from this
+    /// state with the opponent pinned to that combo and everyone else drawn
+    /// from the tracked ranges — an estimate of what the combo was worth
+    /// before we replaced the blueprint with a resolved strategy.
+    fn estimate_river_alt(
+        &self,
+        h: &Hand,
+        hist: &[u8],
+        tracker: &RangeTracker,
+        villain: usize,
+        rng: &mut SmallRng,
+    ) -> Vec<f64> {
+        use rayon::prelude::*;
+        const ROLLOUTS: usize = 6;
+        let combos = crate::search::all_combos();
+        let base_seed: u64 = rand::Rng::random(rng);
+        let board = h.board().to_vec();
+
+        (0..crate::search::NUM_COMBOS)
+            .into_par_iter()
+            .map(|ci| {
+                let c = combos[ci];
+                if board.contains(&c[0]) || board.contains(&c[1]) {
+                    return 0.0;
+                }
+                let mut rng = <SmallRng as rand::SeedableRng>::seed_from_u64(
+                    base_seed ^ (ci as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                );
+                let mut sum = 0.0;
+                for _ in 0..ROLLOUTS {
+                    let mut sim = h.clone();
+                    // Sample everyone from the tracker, then pin the villain
+                    // (rejecting samples that collide with the pinned combo).
+                    let mut want = tracker.sample_holes(&sim, &mut rng);
+                    for _ in 0..10 {
+                        let clash = want
+                            .iter()
+                            .enumerate()
+                            .any(|(p, w)| {
+                                p != villain
+                                    && w.is_some_and(|w| {
+                                        w.contains(&c[0]) || w.contains(&c[1])
+                                    })
+                            });
+                        if !clash {
+                            break;
+                        }
+                        want = tracker.sample_holes(&sim, &mut rng);
+                    }
+                    want[villain] = Some(c);
+                    let clash = want.iter().enumerate().any(|(p, w)| {
+                        p != villain
+                            && w.is_some_and(|w| w.contains(&c[0]) || w.contains(&c[1]))
+                    });
+                    if clash {
+                        for (p, w) in want.iter_mut().enumerate() {
+                            if p != villain {
+                                *w = None; // uniform fallback
+                            }
+                        }
+                    }
+                    sim.resample_hidden_with(&want, &mut rng);
+
+                    let mut hist2 = hist.to_vec();
+                    let mut guard = 0;
+                    while !sim.is_terminal() {
+                        guard += 1;
+                        debug_assert!(guard < 100, "alt rollout did not terminate");
+                        if guard >= 100 {
+                            break;
+                        }
+                        let a = self.act_blueprint(&sim, &hist2, &mut rng);
+                        let street_before = sim.street();
+                        sim.apply(self.abs.concrete(&sim, a));
+                        hist2.push(a.token());
+                        if !sim.is_terminal() && sim.street() != street_before {
+                            hist2.push(crate::abstraction::TOKEN_STREET_SEP);
+                        }
+                    }
+                    if sim.is_terminal() {
+                        sum += sim.utilities()[villain] as f64;
+                    }
+                }
+                sum / ROLLOUTS as f64
+            })
+            .collect()
     }
 }
 
@@ -364,9 +465,10 @@ mod tests {
             &h,
             &hist,
             SearchParams {
-                time_ms: 10_000,
+                time_ms: 60_000, // generous: survives CPU contention in CI
                 max_iters: 20_000,
                 qre_lambda: None,
+                safe_resolve: false,
             },
             None,
             None,
@@ -389,6 +491,85 @@ mod tests {
         done.apply(PlayerAction::CheckCall);
         assert!(done.is_terminal());
         assert!(done.utilities()[0] > 0);
+    }
+
+    /// Safe (gadget) river resolving end to end through act_with_search:
+    /// rollout-estimated safety values + gadget solve must still call the
+    /// shove with the nuts.
+    #[test]
+    fn safe_resolve_calls_the_nuts_on_the_river() {
+        use crate::search::RangeTracker;
+        let front = parse_cards("As Ks 2c 7d Qs Js Ts 3h 4d").unwrap();
+        let mut deck = fresh_deck();
+        let mut used = [false; 52];
+        for (i, &c) in front.iter().enumerate() {
+            deck[i] = c;
+            used[c as usize] = true;
+        }
+        let mut idx = front.len();
+        for c in 0..52u8 {
+            if !used[c as usize] {
+                deck[idx] = c;
+                idx += 1;
+            }
+        }
+        let hand_cfg = HandConfig {
+            num_players: 2,
+            stack: 2_000,
+            sb: 50,
+            bb: 100,
+        };
+        let mut h = Hand::new(&hand_cfg, 0, deck);
+        let abs = Arc::new(abs_small());
+        let policy = Policy::new(
+            Blueprint {
+                strategies: HashMap::new(),
+                iterations: 0,
+                num_players: 2,
+                abs_cfg: AbsConfig::default(),
+                centroids: None,
+            },
+            abs.clone(),
+        );
+        let mut hist: Vec<u8> = Vec::new();
+        let mut tracker = RangeTracker::new(2);
+        let mut act = |h: &mut Hand, hist: &mut Vec<u8>, a: AbsAction| {
+            let street_before = h.street();
+            h.apply(abs.concrete(h, a));
+            hist.push(a.token());
+            if !h.is_terminal() && h.street() != street_before {
+                hist.push(crate::abstraction::TOKEN_STREET_SEP);
+            }
+        };
+        for _ in 0..3 {
+            act(&mut h, &mut hist, AbsAction::CheckCall);
+            act(&mut h, &mut hist, AbsAction::CheckCall);
+        }
+        assert_eq!(h.street(), Street::River);
+        act(&mut h, &mut hist, AbsAction::AllIn); // p1 shoves
+        assert_eq!(h.to_act(), 0);
+        tracker.exclude(h.board());
+
+        let train_cfg = TrainConfig {
+            hand: hand_cfg,
+            prune_after: u64::MAX,
+            ..TrainConfig::default()
+        };
+        let mut rng = SmallRng::seed_from_u64(5);
+        let a = policy.act_with_search(
+            &h,
+            &hist,
+            SearchParams {
+                time_ms: 5_000,
+                max_iters: 300,
+                qre_lambda: None,
+                safe_resolve: true,
+            },
+            &train_cfg,
+            Some(&tracker),
+            &mut rng,
+        );
+        assert_eq!(a, AbsAction::CheckCall, "royal must call even with the gadget");
     }
 
     /// Depth-limited, range-tracked flop resolve: must produce a trained
@@ -439,6 +620,7 @@ mod tests {
                 time_ms: 5_000,
                 max_iters: 3_000,
                 qre_lambda: None,
+                safe_resolve: false,
             },
             Some(&tracker),
             Some(LeafCfg {

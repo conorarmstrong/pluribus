@@ -84,6 +84,23 @@ Actions: `f` fold · `c`/`k` check/call · `r 500` raise TO 500 · `a` all-in ·
   style), with O(N) sorted-sweep showdown evaluation and exact card-removal
   blocker effects.
 
+`--safe-resolve` (opt-in) runs river resolves as a **resolving gadget game**
+(Burch et al. 2014): the opponent may take a rollout-estimated blueprint
+safety value per combo instead of entering the subgame, which provably
+bounds how much a resolve based on *wrong* tracked ranges can be exploited.
+The `ablate-safety` command measures this: across random river spots with
+beliefs corrupted at noise level ε, the opponent's best-response margin
+beyond its safety values grows steadily for unsafe resolving (mean 2.7 →
+8.9 chips, worst combo 205 chips ≈ 10% of pot at ε=1) while gadget
+resolving stays at CFR convergence noise (~1.4 chips) **independent of ε**.
+
+`--value-net <file>` (opt-in) enables **ReBeL-style flop solving**: flop
+decisions against one live opponent are re-solved as a depth-limited
+vector-CFR game over both tracked ranges, with end-of-flop leaves valued by
+a trained belief-state value network (one query per candidate turn card,
+refreshed as the leaf ranges evolve). Build the net with `gen-turn-data`
+(exact turn solves as targets) and `train-value-net`.
+
 `--qre-lambda <x>` (opt-in) models opponents during search as
 **lambda-rational** (logit quantal response) instead of perfectly rational:
 0 = uniform random, higher = more rational. The bot then best-responds to
@@ -288,6 +305,8 @@ Blueprint: 12 EMD k-means buckets/street, full bet menus, 128.5M infosets
 - Brown & Sandholm, "Solving Imperfect-Information Games via Discounted
   Regret Minimization", AAAI 2019 (Linear CFR)
 - Tammelin et al., "Solving Heads-Up Limit Texas Hold'em", IJCAI 2015 (CFR+)
+- Burch, Johanson & Bowling, "Solving Imperfect Information Games Using
+  Decomposition", AAAI 2014 (the resolving gadget behind --safe-resolve)
 - Brown, Bakhtin, Lerer & Gong, "Combining Deep Reinforcement Learning and
   Search for Imperfect-Information Games", NeurIPS 2020 (ReBeL; the river
   solver's range-vector formulation)

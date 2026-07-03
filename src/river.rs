@@ -44,6 +44,21 @@ enum Terminal {
     Showdown { matched: f64, dead: f64 },
 }
 
+/// Resolving gadget (Burch et al. 2014): before entering the subgame, the
+/// opponent may instead take a per-combo alternative payoff (their safety
+/// value under the strategy being replaced). Solving the gadget game bounds
+/// the opponent's best response against the resolved strategy by those
+/// alternatives — resolving cannot increase exploitability.
+struct Gadget {
+    /// Per-combo alternative payoff for solver player 1, in chips.
+    alt: Vec<f64>,
+    /// RM+ regrets per combo for [enter, take-alternative].
+    regret: Vec<f64>,
+    /// Linear-averaged enter probability numerator/denominator.
+    enter_sum: Vec<f64>,
+    weight_sum: f64,
+}
+
 pub struct RiverSolver {
     combos: Vec<[Card; 2]>,
     /// Initial (unnormalized) range per solver player, board conflicts zeroed.
@@ -53,6 +68,10 @@ pub struct RiverSolver {
     rank: Vec<u32>,
     nodes: Vec<Node>,
     terminals: Vec<Terminal>,
+    gadget: Option<Gadget>,
+    /// Linear-weighted root counterfactual value sums per solver player.
+    root_vals: [Vec<f64>; 2],
+    weight_sum: f64,
     iters: u64,
 }
 
@@ -117,10 +136,27 @@ impl RiverSolver {
             rank,
             nodes: Vec::new(),
             terminals: Vec::new(),
+            gadget: None,
+            root_vals: [vec![0.0; NUM_COMBOS], vec![0.0; NUM_COMBOS]],
+            weight_sum: 0.0,
             iters: 0,
         };
         solver.expand(h.clone(), abs, seats);
         Some(solver)
+    }
+
+    /// Enable safe resolving: `alt[ci]` is solver player 1's per-combo
+    /// alternative payoff (chips) — its safety value under the strategy
+    /// being replaced.
+    pub fn with_gadget(mut self, alt: Vec<f64>) -> RiverSolver {
+        debug_assert_eq!(alt.len(), NUM_COMBOS);
+        self.gadget = Some(Gadget {
+            alt,
+            regret: vec![0.0; NUM_COMBOS * 2],
+            enter_sum: vec![0.0; NUM_COMBOS],
+            weight_sum: 0.0,
+        });
+        self
     }
 
     /// Recursively expand the betting tree. Returns the root ref.
@@ -174,17 +210,215 @@ impl RiverSolver {
 
     /// Run alternating-updates vector CFR+ for a time/iteration budget.
     /// `qre_lambda`: model solver player 1 (the opponent) as lambda-rational.
+    /// With a gadget, player 1's subgame reach is scaled by its current
+    /// enter probability and the enter/alternative choice is regret-matched.
     pub fn solve(&mut self, max_iters: u64, time_ms: u64, qre_lambda: Option<f64>) {
         let start = std::time::Instant::now();
         while self.iters < max_iters && (start.elapsed().as_millis() as u64) < time_ms {
             self.iters += 1;
             let t = self.iters as f64;
-            for u in 0..2 {
-                let reach_own = self.range[u].clone();
-                let reach_opp = self.range[1 - u].clone();
-                self.walk(Kid::Node(self.root()), u, &reach_own, &reach_opp, t, qre_lambda);
+            let enter = self.gadget_enter_probs();
+
+            let reach_own = self.range[0].clone();
+            let reach_opp: Vec<f64> = self.range[1]
+                .iter()
+                .zip(&enter)
+                .map(|(&w, &e)| w * e)
+                .collect();
+            let v0 = self.walk(Kid::Node(self.root()), 0, &reach_own, &reach_opp, t, qre_lambda);
+            for (acc, &x) in self.root_vals[0].iter_mut().zip(&v0) {
+                *acc += t * x;
+            }
+
+            let reach_own: Vec<f64> = self.range[1]
+                .iter()
+                .zip(&enter)
+                .map(|(&w, &e)| w * e)
+                .collect();
+            let reach_opp = self.range[0].clone();
+            let v_enter =
+                self.walk(Kid::Node(self.root()), 1, &reach_own, &reach_opp, t, qre_lambda);
+            for (acc, &x) in self.root_vals[1].iter_mut().zip(&v_enter) {
+                *acc += t * x;
+            }
+            if self.gadget.is_some() {
+                self.update_gadget(&v_enter, &enter, t);
+            }
+            self.weight_sum += t;
+        }
+    }
+
+    /// Per-combo expected chip value at the root (counterfactual value
+    /// normalized by compatible opponent mass; for player 1 this is the
+    /// value of ENTERING the subgame).
+    pub fn root_values(&self, u: usize) -> Vec<f64> {
+        let compat = self.compat_mass(u);
+        (0..NUM_COMBOS)
+            .map(|ci| {
+                if self.weight_sum <= 0.0 || compat[ci] <= 0.0 {
+                    0.0
+                } else {
+                    self.root_vals[u][ci] / self.weight_sum / compat[ci]
+                }
+            })
+            .collect()
+    }
+
+    /// Current per-combo probability that solver player 1 enters the
+    /// subgame (1.0 everywhere without a gadget).
+    fn gadget_enter_probs(&self) -> Vec<f64> {
+        match &self.gadget {
+            None => vec![1.0; NUM_COMBOS],
+            Some(g) => (0..NUM_COMBOS)
+                .map(|ci| {
+                    let (re, ra) = (g.regret[ci * 2], g.regret[ci * 2 + 1]);
+                    let tot = re + ra;
+                    if tot > 0.0 {
+                        re / tot
+                    } else {
+                        0.5
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// RM+ update of the gadget's enter/alternative regrets after a player-1
+    /// pass returned `v_enter` (compat-weighted CFVs of entering).
+    fn update_gadget(&mut self, v_enter: &[f64], enter: &[f64], t: f64) {
+        // Alternative CFVs: alt chips × hero-compatible mass, matching the
+        // scale of walk() values.
+        let hero = &self.range[0];
+        let mut total = 0.0f64;
+        let mut card = [0.0f64; 52];
+        for (ci, combo) in self.combos.iter().enumerate() {
+            let w = hero[ci];
+            if w > 0.0 {
+                total += w;
+                card[combo[0] as usize] += w;
+                card[combo[1] as usize] += w;
             }
         }
+        let compats: Vec<f64> = self
+            .combos
+            .iter()
+            .enumerate()
+            .map(|(ci, c)| total - card[c[0] as usize] - card[c[1] as usize] + hero[ci])
+            .collect();
+        let g = self.gadget.as_mut().unwrap();
+        for ci in 0..NUM_COMBOS {
+            let va = g.alt[ci] * compats[ci];
+            let e = enter[ci];
+            let v_mix = e * v_enter[ci] + (1.0 - e) * va;
+            g.regret[ci * 2] = (g.regret[ci * 2] + v_enter[ci] - v_mix).max(0.0);
+            g.regret[ci * 2 + 1] = (g.regret[ci * 2 + 1] + va - v_mix).max(0.0);
+            g.enter_sum[ci] += t * e;
+        }
+        g.weight_sum += t;
+    }
+
+    /// Exact per-combo best-response values for player `u` against the
+    /// other player's linear-average strategy — same compat-weighted units
+    /// as walk(); divide by `compat_mass(u)` for chips per combo. When a
+    /// gadget is active and `u == 0`, player 1's reach is scaled by its
+    /// average enter probability (the exploiter itself, `u == 1`, is
+    /// unconstrained: it knows the hero's strategy).
+    pub fn best_response_values(&self, u: usize) -> Vec<f64> {
+        let mut reach_opp = self.range[1 - u].clone();
+        if u == 0 {
+            if let Some(g) = &self.gadget {
+                if g.weight_sum > 0.0 {
+                    for (w, s) in reach_opp.iter_mut().zip(&g.enter_sum) {
+                        *w *= s / g.weight_sum;
+                    }
+                }
+            }
+        }
+        self.br_walk(Kid::Node(self.root()), u, &reach_opp)
+    }
+
+    fn br_walk(&self, at: Kid, u: usize, reach_opp: &[f64]) -> Vec<f64> {
+        let ni = match at {
+            Kid::End(ti) => return self.terminal_values(ti, u, reach_opp),
+            Kid::Node(ni) => ni,
+        };
+        let node = &self.nodes[ni];
+        let n_acts = node.acts.len();
+        if node.player == u {
+            let mut vals = vec![f64::NEG_INFINITY; NUM_COMBOS];
+            for a in 0..n_acts {
+                let kid = match &node.kids[a] {
+                    Kid::Node(x) => Kid::Node(*x),
+                    Kid::End(x) => Kid::End(*x),
+                };
+                let v = self.br_walk(kid, u, reach_opp);
+                for (o, &x) in vals.iter_mut().zip(&v) {
+                    if x > *o {
+                        *o = x;
+                    }
+                }
+            }
+            vals
+        } else {
+            let sigma = self.node_avg_sigma(ni);
+            let mut vals = vec![0.0; NUM_COMBOS];
+            for a in 0..n_acts {
+                let mut opp = vec![0.0; NUM_COMBOS];
+                for ci in 0..NUM_COMBOS {
+                    opp[ci] = reach_opp[ci] * sigma[ci * n_acts + a];
+                }
+                let kid = match &node.kids[a] {
+                    Kid::Node(x) => Kid::Node(*x),
+                    Kid::End(x) => Kid::End(*x),
+                };
+                let v = self.br_walk(kid, u, &opp);
+                for (o, &x) in vals.iter_mut().zip(&v) {
+                    *o += x;
+                }
+            }
+            vals
+        }
+    }
+
+    /// Per-combo linear-average strategy at a node (uniform where unvisited).
+    fn node_avg_sigma(&self, ni: usize) -> Vec<f64> {
+        let node = &self.nodes[ni];
+        let n_acts = node.acts.len();
+        let mut sigma = vec![0.0; NUM_COMBOS * n_acts];
+        for ci in 0..NUM_COMBOS {
+            let s = &node.strat[ci * n_acts..(ci + 1) * n_acts];
+            let total: f64 = s.iter().sum();
+            let out = &mut sigma[ci * n_acts..(ci + 1) * n_acts];
+            if total > 0.0 {
+                for (o, &x) in out.iter_mut().zip(s) {
+                    *o = x / total;
+                }
+            } else {
+                out.fill(1.0 / n_acts as f64);
+            }
+        }
+        sigma
+    }
+
+    /// Compatible opponent mass per combo for player `u` (the divisor that
+    /// converts compat-weighted values into chips per combo).
+    pub fn compat_mass(&self, u: usize) -> Vec<f64> {
+        let opp = &self.range[1 - u];
+        let mut total = 0.0f64;
+        let mut card = [0.0f64; 52];
+        for (ci, combo) in self.combos.iter().enumerate() {
+            let w = opp[ci];
+            if w > 0.0 {
+                total += w;
+                card[combo[0] as usize] += w;
+                card[combo[1] as usize] += w;
+            }
+        }
+        self.combos
+            .iter()
+            .enumerate()
+            .map(|(ci, c)| total - card[c[0] as usize] - card[c[1] as usize] + opp[ci])
+            .collect()
     }
 
     #[allow(dead_code)] // used by tests; useful for diagnostics
