@@ -78,20 +78,32 @@ Actions: `f` fold · `c`/`k` check/call · `r 500` raise TO 500 · `a` all-in ·
 - samples opponents' hidden cards from **tracked ranges** — every seat's
   range is Bayes-updated after every action using the blueprint's action
   probabilities (with a floor, so nothing is ever fully ruled out);
+- roots every subgame at the **real table state**, so an opponent's
+  off-tree bet is re-solved at its actual size (**nested re-solving**)
+  instead of being priced at the nearest abstract size — the shadow hand
+  is kept only for blueprint infoset lookups;
 - on the flop, solves **depth-limited** to the end of the street; at the
   leaves each player picks among four continuation strategies (blueprint
   as-is, fold-, call- or raise-biased) valued by blueprint rollouts —
   Pluribus's defense against exploitable leaf values;
-- on the turn, solves to the end of the hand with MCCFR (CFR+ updates);
+- on the turn with two live players, solves **exactly** to the end of the
+  hand: vector-form CFR+ over the turn tree, an explicit river chance
+  node, and the full river tree beneath it (slim bet menu); multiway turn
+  spots fall back to sampled MCCFR;
 - on the river with two live players, solves **exactly**: vector-form CFR+
   over both players' full tracked ranges at once (all 1326 combos, ReBeL
   style), with O(N) sorted-sweep showdown evaluation and exact card-removal
   blocker effects.
 
-`--safe-resolve` (opt-in) runs river resolves as a **resolving gadget game**
-(Burch et al. 2014): the opponent may take a rollout-estimated blueprint
-safety value per combo instead of entering the subgame, which provably
-bounds how much a resolve based on *wrong* tracked ranges can be exploited.
+`--safe-resolve` (opt-in) runs turn and river resolves as a **resolving
+gadget game** (Burch et al. 2014): the opponent may take a per-combo safety
+value instead of entering the subgame, which provably bounds how much a
+resolve based on *wrong* tracked ranges can be exploited. Safety values
+come from **continual resolving** (DeepStack-style) where possible: the
+exact turn resolve records the opponent's counterfactual values at every
+river-entry node, and the river resolve consumes them as its gadget
+alternatives when the betting line stayed on the solve's tree and the bot
+opens the river; otherwise they are rollout-estimated from the blueprint.
 The `ablate-safety` command measures this: across random river spots with
 beliefs corrupted at noise level ε, the opponent's best-response margin
 beyond its safety values grows steadily for unsafe resolving (mean 2.7 →
@@ -326,7 +338,7 @@ tracked ranges (see `play` above).
 
 ## Correctness
 
-The project is TDD-built with 96 tests:
+The project is TDD-built with 101 tests:
 
 - evaluator: category spot checks, ordering checks, and a 30k-hand
   differential test against an independent naive evaluator
@@ -347,8 +359,16 @@ The project is TDD-built with 96 tests:
   early only when the root strategy is already near-pure
 - turn/flop solvers: the turn solver builds a multi-street tree with
   zero-sum, normalized root values (a made royal calls a shove for full
-  pot); the flop solver's leaf-sampled and full-solve root strategies both
-  normalize
+  pot); the gadget turn resolve still finds mandatory calls while combos
+  paid more than the pot to leave stay out; the continual-resolving carry
+  exposes river-entry CFVs by betting line (royal dominates junk,
+  off-tree lines miss cleanly); the flop solver's leaf-sampled and
+  full-solve root strategies both normalize
+- table search routing: exact turn resolves fire through act_with_search
+  (plain and gadget); off-tree bets are priced at their real size (a
+  42%-equity bluff-catcher folds to a real 800-into-200 bet that maps to
+  the callable 400 abstract size); the turn resolve's carry is consumed
+  by the river gadget on the line actually played
 - value network: the MLP's analytic gradients match central finite
   differences and it overfits a tiny nonlinear dataset (save/load
   round-trips); the belief-state encoding has the right shape and

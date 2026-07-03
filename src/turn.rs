@@ -54,6 +54,51 @@ enum Terminal {
 /// One child per possible river card, aligned with `TurnSolver::rivers`.
 struct ChanceNode {
     kids: Vec<Kid>,
+    /// Action tokens from the resolve root to this street close.
+    path: Vec<u8>,
+    /// Linear-weighted player-1 CFV sums at each river child,
+    /// flattened [river][combo] — the continual-resolving carry.
+    cfv: Vec<f64>,
+    /// Matching player-0 compatible-reach mass sums.
+    mass: Vec<f64>,
+}
+
+/// Opponent (solver player 1) counterfactual values at every river-entry
+/// node of a solved turn subgame, keyed by the turn betting line — the
+/// carry for continual resolving: they become the river resolve's gadget
+/// alternatives, replacing rollout estimates.
+pub struct TurnCarry {
+    /// Betting line (action tokens since the resolve root) → chance index.
+    paths: std::collections::HashMap<Vec<u8>, usize>,
+    rivers: Vec<Card>,
+    /// [chance][river × NUM_COMBOS] normalized chips per combo.
+    alt: Vec<Vec<f64>>,
+}
+
+impl TurnCarry {
+    /// Per-combo alternative payoffs (chips) for the opponent at the river
+    /// entry reached by `line` (turn tokens since the resolve root, without
+    /// the street separator) with `river` dealt. None when the line is off
+    /// the solve's slim tree.
+    pub fn alt_for(&self, line: &[u8], river: Card) -> Option<Vec<f64>> {
+        let &ci = self.paths.get(line)?;
+        let ri = self.rivers.iter().position(|&r| r == river)?;
+        Some(self.alt[ci][ri * NUM_COMBOS..(ri + 1) * NUM_COMBOS].to_vec())
+    }
+}
+
+/// Resolving gadget (Burch et al. 2014), identical to the river solver's:
+/// solver player 1 may take a per-combo alternative payoff instead of
+/// entering the subgame, bounding what resolving with wrong beliefs can
+/// lose (see river.rs for the full account).
+struct Gadget {
+    /// Per-combo alternative payoff for solver player 1, in chips.
+    alt: Vec<f64>,
+    /// RM+ regrets per combo for [enter, take-alternative].
+    regret: Vec<f64>,
+    /// Linear-averaged enter probability numerator.
+    enter_sum: Vec<f64>,
+    weight_sum: f64,
 }
 
 pub struct TurnSolver {
@@ -72,6 +117,7 @@ pub struct TurnSolver {
     root_vals: [Vec<f64>; 2],
     weight_sum: f64,
     iters: u64,
+    gadget: Option<Gadget>,
 }
 
 impl TurnSolver {
@@ -154,8 +200,9 @@ impl TurnSolver {
             root_vals: [vec![0.0; NUM_COMBOS], vec![0.0; NUM_COMBOS]],
             weight_sum: 0.0,
             iters: 0,
+            gadget: None,
         };
-        let root = solver.expand(h.clone(), abs, seats, keep, None);
+        let root = solver.expand(h.clone(), abs, seats, keep, None, Vec::new());
         let Kid::Node(root_ix) = root else {
             return None; // degenerate root (shouldn't happen on a live turn)
         };
@@ -175,7 +222,20 @@ impl TurnSolver {
             .collect()
     }
 
-    /// Recursively expand. `river_ix` is Some once below the chance node.
+    fn new_chance(&mut self, kids: Vec<Kid>, path: Vec<u8>) -> Kid {
+        let n = self.rivers.len();
+        self.chances.push(ChanceNode {
+            kids,
+            path,
+            cfv: vec![0.0; n * NUM_COMBOS],
+            mass: vec![0.0; n * NUM_COMBOS],
+        });
+        Kid::Chance(self.chances.len() - 1)
+    }
+
+    /// Recursively expand. `river_ix` is Some once below the chance node;
+    /// `path` is the action-token line from the resolve root (tracked down
+    /// to the chance nodes for the continual-resolving carry).
     fn expand(
         &mut self,
         h: Hand,
@@ -183,6 +243,7 @@ impl TurnSolver {
         seats: [usize; 2],
         keep: &[u8],
         river_ix: Option<usize>,
+        path: Vec<u8>,
     ) -> Kid {
         if h.is_terminal() {
             if h.live_count() == 1 {
@@ -220,8 +281,7 @@ impl TurnSolver {
                             Kid::End(self.terminals.len() - 1)
                         })
                         .collect();
-                    self.chances.push(ChanceNode { kids });
-                    Kid::Chance(self.chances.len() - 1)
+                    return self.new_chance(kids, path);
                 }
             };
         }
@@ -232,11 +292,10 @@ impl TurnSolver {
                 .map(|ri| {
                     let mut child = h.clone();
                     child.force_board_card(4, self.rivers[ri]);
-                    self.expand(child, abs, seats, keep, Some(ri))
+                    self.expand(child, abs, seats, keep, Some(ri), Vec::new())
                 })
                 .collect();
-            self.chances.push(ChanceNode { kids });
-            return Kid::Chance(self.chances.len() - 1);
+            return self.new_chance(kids, path);
         }
 
         let seat = h.to_act();
@@ -247,7 +306,9 @@ impl TurnSolver {
             .map(|&a| {
                 let mut child = h.clone();
                 child.apply(abs.concrete(&h, a));
-                self.expand(child, abs, seats, keep, river_ix)
+                let mut p2 = path.clone();
+                p2.push(a.token());
+                self.expand(child, abs, seats, keep, river_ix, p2)
             })
             .collect();
         let n_acts = acts.len();
@@ -275,23 +336,117 @@ impl TurnSolver {
         self.iters
     }
 
+    /// Safe (gadget) resolving: per-combo alternative payoffs in chips for
+    /// solver player 1 (the opponent of the player to act).
+    pub fn with_gadget(mut self, alt: Vec<f64>) -> TurnSolver {
+        debug_assert_eq!(alt.len(), NUM_COMBOS);
+        self.gadget = Some(Gadget {
+            alt,
+            regret: vec![0.0; NUM_COMBOS * 2],
+            enter_sum: vec![0.0; NUM_COMBOS],
+            weight_sum: 0.0,
+        });
+        self
+    }
+
+    /// Player 1's linear-averaged probability of entering the subgame with
+    /// `ci` (1.0 without a gadget or before any iteration).
+    pub fn avg_enter_prob(&self, ci: usize) -> f64 {
+        match &self.gadget {
+            None => 1.0,
+            Some(g) if g.weight_sum <= 0.0 => 1.0,
+            Some(g) => g.enter_sum[ci] / g.weight_sum,
+        }
+    }
+
     /// Run alternating vector CFR+ for a time/iteration budget, accumulating
-    /// linear-weighted root counterfactual values.
+    /// linear-weighted root counterfactual values. With a gadget, player 1's
+    /// subgame reach is scaled by its current enter probability and the
+    /// enter/alternative choice is regret-matched (RM+).
     pub fn solve(&mut self, max_iters: u64, time_ms: u64) {
         let start = std::time::Instant::now();
         while self.iters < max_iters && (start.elapsed().as_millis() as u64) < time_ms {
             self.iters += 1;
             let t = self.iters as f64;
-            for u in 0..2 {
-                let reach_own = self.range[u].clone();
-                let reach_opp = self.range[1 - u].clone();
-                let v = self.walk(Kid::Node(self.root()), u, &reach_own, &reach_opp, t);
-                for (acc, &x) in self.root_vals[u].iter_mut().zip(&v) {
-                    *acc += t * x;
-                }
+            let enter = self.gadget_enter_probs();
+
+            let reach_own = self.range[0].clone();
+            let reach_opp: Vec<f64> = self.range[1]
+                .iter()
+                .zip(&enter)
+                .map(|(&w, &e)| w * e)
+                .collect();
+            let v0 = self.walk(Kid::Node(self.root()), 0, &reach_own, &reach_opp, t);
+            for (acc, &x) in self.root_vals[0].iter_mut().zip(&v0) {
+                *acc += t * x;
+            }
+
+            let reach_own: Vec<f64> = self.range[1]
+                .iter()
+                .zip(&enter)
+                .map(|(&w, &e)| w * e)
+                .collect();
+            let reach_opp = self.range[0].clone();
+            let v_enter = self.walk(Kid::Node(self.root()), 1, &reach_own, &reach_opp, t);
+            for (acc, &x) in self.root_vals[1].iter_mut().zip(&v_enter) {
+                *acc += t * x;
+            }
+            if self.gadget.is_some() {
+                self.update_gadget(&v_enter, &enter, t);
             }
             self.weight_sum += t;
         }
+    }
+
+    /// Current per-combo probability that solver player 1 enters the
+    /// subgame (1.0 everywhere without a gadget).
+    fn gadget_enter_probs(&self) -> Vec<f64> {
+        match &self.gadget {
+            None => vec![1.0; NUM_COMBOS],
+            Some(g) => (0..NUM_COMBOS)
+                .map(|ci| {
+                    let (re, ra) = (g.regret[ci * 2], g.regret[ci * 2 + 1]);
+                    let tot = re + ra;
+                    if tot > 0.0 {
+                        re / tot
+                    } else {
+                        0.5
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// RM+ update of the gadget's enter/alternative regrets after a player-1
+    /// pass returned `v_enter` (compat-weighted CFVs of entering).
+    fn update_gadget(&mut self, v_enter: &[f64], enter: &[f64], t: f64) {
+        let hero = &self.range[0];
+        let mut total = 0.0f64;
+        let mut card = [0.0f64; 52];
+        for (ci, combo) in self.combos.iter().enumerate() {
+            let w = hero[ci];
+            if w > 0.0 {
+                total += w;
+                card[combo[0] as usize] += w;
+                card[combo[1] as usize] += w;
+            }
+        }
+        let compats: Vec<f64> = self
+            .combos
+            .iter()
+            .enumerate()
+            .map(|(ci, c)| total - card[c[0] as usize] - card[c[1] as usize] + hero[ci])
+            .collect();
+        let g = self.gadget.as_mut().unwrap();
+        for ci in 0..NUM_COMBOS {
+            let va = g.alt[ci] * compats[ci];
+            let e = enter[ci];
+            let v_mix = e * v_enter[ci] + (1.0 - e) * va;
+            g.regret[ci * 2] = (g.regret[ci * 2] + v_enter[ci] - v_mix).max(0.0);
+            g.regret[ci * 2 + 1] = (g.regret[ci * 2 + 1] + va - v_mix).max(0.0);
+            g.enter_sum[ci] += t * e;
+        }
+        g.weight_sum += t;
     }
 
     /// Average strategy at the root for solver player 0's `hole`.
@@ -307,6 +462,29 @@ impl TurnSolver {
             return None;
         }
         Some((node.acts.clone(), s.iter().map(|&x| x / total).collect()))
+    }
+
+    /// Extract the continual-resolving carry: player 1's normalized CFVs
+    /// (chips per combo) at every river-entry node, keyed by the turn
+    /// betting line. Combos with no accumulated mass report 0.
+    pub fn extract_carry(&self) -> TurnCarry {
+        let mut paths = std::collections::HashMap::new();
+        let mut alt = Vec::with_capacity(self.chances.len());
+        for (xi, ch) in self.chances.iter().enumerate() {
+            paths.insert(ch.path.clone(), xi);
+            let mut a = vec![0.0; self.rivers.len() * NUM_COMBOS];
+            for (i, o) in a.iter_mut().enumerate() {
+                if ch.mass[i] > 0.0 {
+                    *o = ch.cfv[i] / ch.mass[i];
+                }
+            }
+            alt.push(a);
+        }
+        TurnCarry {
+            paths,
+            rivers: self.rivers.clone(),
+            alt,
+        }
     }
 
     /// Per-combo expected chip value for solver player `u` holding each
@@ -361,6 +539,34 @@ impl TurnSolver {
                     }
                     let kid = self.chances[xi].kids[ri].shallow();
                     let v = self.walk(kid, u, &own, &opp, t);
+                    // Continual-resolving carry: accumulate player 1's CFVs
+                    // and the matching player-0 compatible mass at this
+                    // river entry (player-1 passes only — the values are
+                    // player 1's).
+                    if u == 1 {
+                        let mut total = 0.0f64;
+                        let mut card = [0.0f64; 52];
+                        for (ci, combo) in self.combos.iter().enumerate() {
+                            let w = opp[ci];
+                            if w > 0.0 {
+                                total += w;
+                                card[combo[0] as usize] += w;
+                                card[combo[1] as usize] += w;
+                            }
+                        }
+                        let ch = &mut self.chances[xi];
+                        for (ci, combo) in self.combos.iter().enumerate() {
+                            if combo[0] as usize == r || combo[1] as usize == r {
+                                continue;
+                            }
+                            let compat = total
+                                - card[combo[0] as usize]
+                                - card[combo[1] as usize]
+                                + opp[ci];
+                            ch.cfv[ri * NUM_COMBOS + ci] += t * v[ci];
+                            ch.mass[ri * NUM_COMBOS + ci] += t * compat;
+                        }
+                    }
                     for (ci, combo) in self.combos.iter().enumerate() {
                         if combo[0] as usize != r && combo[1] as usize != r {
                             vals[ci] += p * v[ci];
@@ -617,6 +823,75 @@ mod tests {
             "made royal must value ~+2000 (wins every river), got {}",
             v[ci]
         );
+    }
+
+    /// Gadget (safe) turn resolving: with per-combo alternative payoffs for
+    /// the opponent, the solve must still find the mandatory call with a
+    /// made royal, and combos whose alternative dwarfs their subgame value
+    /// must mostly take the alternative (their average enter probability
+    /// stays low).
+    #[test]
+    fn gadget_turn_resolve_calls_the_nuts_and_respects_alternatives() {
+        let (h, abs) = turn_facing_shove();
+        let uni = vec![1.0; NUM_COMBOS];
+        // Alternative payoffs: junk-level for everything except one combo
+        // paid an unbeatable +5000 for leaving (more than any subgame line
+        // can win: the pot ceiling is +2000).
+        let paid = crate::cards::parse_cards("2c 2d").unwrap();
+        let paid_ci = combo_index(paid[0], paid[1]);
+        let mut alt = vec![-200.0; NUM_COMBOS];
+        alt[paid_ci] = 5_000.0;
+        let mut s = TurnSolver::build(&h, &abs, [&uni, &uni], &[3])
+            .unwrap()
+            .with_gadget(alt);
+        s.solve(60, 60_000);
+
+        let nuts = parse_cards("As Ks").unwrap();
+        let (acts, p) = s.root_strategy([nuts[0], nuts[1]]).unwrap();
+        assert_eq!(acts[0], AbsAction::Fold);
+        assert!(p[1] > 0.95, "royal must call the shove under the gadget, got {p:?}");
+        assert!(
+            s.avg_enter_prob(paid_ci) < 0.1,
+            "a combo paid +5000 to leave must not enter a +2000-capped subgame, got {}",
+            s.avg_enter_prob(paid_ci)
+        );
+    }
+
+    /// The continual-resolving carry must expose player 1's CFVs at river
+    /// entries keyed by the betting line: after check-check on the turn,
+    /// the royal's carried value must dominate junk's on a blank river,
+    /// and off-tree lines must return None.
+    #[test]
+    fn carry_exposes_river_entry_cfvs_by_line() {
+        let (h, abs) = turn_p1_to_act();
+        let uni = vec![1.0; NUM_COMBOS];
+        let mut s = TurnSolver::build(&h, &abs, [&uni, &uni], &[3]).unwrap();
+        s.solve(40, 60_000);
+        let carry = s.extract_carry();
+
+        // p1 checks, p0 checks behind: line = [CheckCall, CheckCall].
+        let cc = AbsAction::CheckCall.token();
+        let river = parse_cards("4d").unwrap()[0];
+        let alt = carry
+            .alt_for(&[cc, cc], river)
+            .expect("check-check is on the slim tree");
+        // Carried values are for solver player 1 (p0 here, who acts second
+        // on the turn: seats[0] = to_act = p1). On Qs Js Ts 3h 4d the royal
+        // must carry far more than junk.
+        let nuts = parse_cards("As Ks").unwrap();
+        let junk = parse_cards("7c 2d").unwrap();
+        let vn = alt[combo_index(nuts[0], nuts[1])];
+        let vj = alt[combo_index(junk[0], junk[1])];
+        assert!(
+            vn > vj + 100.0,
+            "royal's carried CFV must dominate junk's: {vn} vs {vj}"
+        );
+
+        // A line outside the slim tree must miss cleanly.
+        assert!(carry.alt_for(&[13, 13, 13], river).is_none());
+        // A card that cannot be a river (already on board) must miss.
+        let board_card = parse_cards("Qs").unwrap()[0];
+        assert!(carry.alt_for(&[cc, cc], board_card).is_none());
     }
 
     /// Root counterfactual values must be (approximately) zero-sum across

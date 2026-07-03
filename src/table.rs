@@ -272,6 +272,7 @@ pub fn run_eval_search(
             deck.shuffle(&mut rng);
             let mut table = Table::new(cfg, button, deck);
             let mut tracker = RangeTracker::new(n);
+            let mut session = crate::bot::SearchSession::new();
             let mut guard = 0;
             while !table.real.is_terminal() {
                 guard += 1;
@@ -285,6 +286,7 @@ pub fn run_eval_search(
                         params,
                         &train_cfg,
                         Some(&tracker),
+                        Some(&mut session),
                         &mut rng,
                     )
                 } else {
@@ -363,6 +365,7 @@ pub fn run_eval_paired_policies(
             .collect();
         let mut table = Table::new(cfg, button, deck);
         let mut tracker = RangeTracker::new(n);
+        let mut session = crate::bot::SearchSession::new();
         let mut guard = 0;
         while !table.real.is_terminal() {
             guard += 1;
@@ -376,6 +379,7 @@ pub fn run_eval_paired_policies(
                     params,
                     &train_cfg,
                     Some(&tracker),
+                    Some(&mut session),
                     &mut seat_rngs[p],
                 ),
                 _ => policy.act_blueprint(&table.shadow, &table.hist, &mut seat_rngs[p]),

@@ -21,6 +21,10 @@ use std::sync::Arc;
 /// richer than the turn solver's data-generation menu, still small enough
 /// to keep leaf-refresh network queries affordable.
 const FLOP_MENU: [u8; 3] = [1, 3, 5];
+/// Bet-size menu for exact turn resolves at the table (75% pot + all-in,
+/// matching the value net's training menu): full menus put the turn+river
+/// vector tree at tens of GB.
+const TURN_MENU: [u8; 1] = [3];
 /// Turn cards sampled per leaf refresh (of 49) — bounds net queries per
 /// refresh at real-time budgets.
 const FLOP_QUERY_TURNS: usize = 16;
@@ -63,6 +67,38 @@ impl Default for SearchParams {
 
 /// Early-exit purity threshold for adaptive search.
 const ADAPTIVE_PURITY: f64 = 0.97;
+
+/// Per-hand search state for continual resolving: the most recent exact
+/// turn resolve's carry (opponent CFVs at river entries) plus where in the
+/// action history that resolve was rooted. Reset every hand.
+#[derive(Default)]
+pub struct SearchSession {
+    pub carry: Option<crate::turn::TurnCarry>,
+    pub root_hist_len: usize,
+}
+
+impl SearchSession {
+    pub fn new() -> SearchSession {
+        SearchSession::default()
+    }
+
+    /// Carried gadget alternatives for a river resolve at `h` given the
+    /// full table history: valid when the line since the turn resolve is on
+    /// the solve's tree and the bot opens the river betting (one street
+    /// separator, at the end — after an opponent river bet the entry CFVs
+    /// no longer describe the resolve root).
+    fn river_alt(&self, h: &Hand, hist: &[u8]) -> Option<Vec<f64>> {
+        let carry = self.carry.as_ref()?;
+        let suffix = hist.get(self.root_hist_len..)?;
+        let (&last, line) = suffix.split_last()?;
+        if last != crate::abstraction::TOKEN_STREET_SEP
+            || line.contains(&crate::abstraction::TOKEN_STREET_SEP)
+        {
+            return None;
+        }
+        carry.alt_for(line, *h.board().get(4)?)
+    }
+}
 
 impl Policy {
     pub fn new(blueprint: Blueprint, abs: Arc<Abstraction>) -> Self {
@@ -143,6 +179,7 @@ impl Policy {
         params: SearchParams,
         train_cfg: &TrainConfig,
         tracker: Option<&RangeTracker>,
+        mut session: Option<&mut SearchSession>,
         rng: &mut SmallRng,
     ) -> AbsAction {
         if real.street() == Street::Preflop {
@@ -152,7 +189,20 @@ impl Policy {
         // (river.rs) instead of sampled MCCFR.
         if real.street() == Street::River && real.live_count() == 2 {
             if let Some(tr) = tracker {
-                if let Some(a) = self.act_river_exact(real, hist, tr, params, rng) {
+                let sess = session.as_deref();
+                if let Some(a) = self.act_river_exact(real, hist, tr, params, sess, rng) {
+                    return a;
+                }
+            }
+        }
+        // Turn spots with two live players: exact turn+river vector solve
+        // (slim bet menu), optionally inside the safety gadget. The solve's
+        // river-entry CFVs are carried in the session for the river
+        // resolve's gadget (continual resolving).
+        if real.street() == Street::Turn && real.live_count() == 2 {
+            if let Some(tr) = tracker {
+                let sess = session.as_deref_mut();
+                if let Some(a) = self.act_turn_exact(real, hist, tr, params, sess, rng) {
                     return a;
                 }
             }
@@ -214,6 +264,41 @@ impl Policy {
         Some(acts[sample_index(&s, rng)])
     }
 
+    /// Exact turn+river resolve over both players' tracked ranges (vector
+    /// CFR+ with the slim `TURN_MENU`, so the tree stays table-budget
+    /// sized). With `safe_resolve`, runs inside the Burch gadget using
+    /// rollout-estimated safety values. None when the spot doesn't qualify
+    /// (caller falls back to sampled MCCFR).
+    fn act_turn_exact(
+        &self,
+        h: &Hand,
+        hist: &[u8],
+        tracker: &RangeTracker,
+        params: SearchParams,
+        session: Option<&mut SearchSession>,
+        rng: &mut SmallRng,
+    ) -> Option<AbsAction> {
+        let hero = h.to_act();
+        let villain = (0..h.num_players()).find(|&p| p != hero && !h.folded(p))?;
+        let mut solver = crate::turn::TurnSolver::build(
+            h,
+            &self.abs,
+            [tracker.seat_weights(hero), tracker.seat_weights(villain)],
+            &TURN_MENU,
+        )?;
+        if params.safe_resolve {
+            let alt = self.estimate_alt(h, hist, tracker, villain, rng);
+            solver = solver.with_gadget(alt);
+        }
+        solver.solve(200, params.time_ms);
+        let (acts, s) = solver.root_strategy(h.hole(hero))?;
+        if let Some(sess) = session {
+            sess.carry = Some(solver.extract_carry());
+            sess.root_hist_len = hist.len();
+        }
+        Some(acts[sample_index(&s, rng)])
+    }
+
     /// Exact river resolve over both players' tracked ranges. None when the
     /// spot doesn't qualify or the hero's combo got no strategy weight, in
     /// which case the caller falls back to sampled MCCFR. With
@@ -225,6 +310,7 @@ impl Policy {
         hist: &[u8],
         tracker: &RangeTracker,
         params: SearchParams,
+        session: Option<&SearchSession>,
         rng: &mut SmallRng,
     ) -> Option<AbsAction> {
         let hero = h.to_act();
@@ -235,7 +321,12 @@ impl Policy {
             [tracker.seat_weights(hero), tracker.seat_weights(villain)],
         )?;
         if params.safe_resolve {
-            let alt = self.estimate_river_alt(h, hist, tracker, villain, rng);
+            // Continual resolving: prefer the turn resolve's carried CFVs
+            // as the gadget alternatives; fall back to rollout estimates
+            // when the line left the carry's tree.
+            let alt = session
+                .and_then(|s| s.river_alt(h, hist))
+                .unwrap_or_else(|| self.estimate_alt(h, hist, tracker, villain, rng));
             solver = solver.with_gadget(alt);
         }
         if params.adaptive {
@@ -258,7 +349,8 @@ impl Policy {
     /// state with the opponent pinned to that combo and everyone else drawn
     /// from the tracked ranges — an estimate of what the combo was worth
     /// before we replaced the blueprint with a resolved strategy.
-    fn estimate_river_alt(
+    /// Street-agnostic: rollouts run from `h` to the end of the hand.
+    fn estimate_alt(
         &self,
         h: &Hand,
         hist: &[u8],
@@ -613,9 +705,200 @@ mod tests {
             },
             &train_cfg,
             Some(&tracker),
+            None,
             &mut rng,
         );
         assert_eq!(a, AbsAction::CheckCall, "royal must call even with the gadget");
+    }
+
+    /// Turn decisions with two live players route to the exact turn+river
+    /// vector solver: a made royal facing a turn shove must call, in both
+    /// plain and gadget (safe) resolving modes.
+    #[test]
+    fn exact_turn_resolve_calls_the_nuts_facing_a_shove() {
+        use crate::search::RangeTracker;
+        use crate::table::Table;
+        let front = parse_cards("As Ks 2c 7d Qs Js Ts 3h 4d").unwrap();
+        let mut deck = fresh_deck();
+        let mut used = [false; 52];
+        for (i, &c) in front.iter().enumerate() {
+            deck[i] = c;
+            used[c as usize] = true;
+        }
+        let mut idx = front.len();
+        for c in 0..52u8 {
+            if !used[c as usize] {
+                deck[idx] = c;
+                idx += 1;
+            }
+        }
+        let hand_cfg = HandConfig {
+            num_players: 2,
+            stack: 2_000,
+            sb: 50,
+            bb: 100,
+        };
+        let abs = Arc::new(abs_small());
+        let policy = Policy::new(
+            Blueprint {
+                strategies: HashMap::new(),
+                iterations: 0,
+                num_players: 2,
+                abs_cfg: AbsConfig::default(),
+                centroids: None,
+            },
+            abs.clone(),
+        );
+        let train_cfg = TrainConfig {
+            hand: hand_cfg.clone(),
+            prune_after: u64::MAX,
+            ..TrainConfig::default()
+        };
+        for safe in [false, true] {
+            let mut table = Table::new(&hand_cfg, 0, deck);
+            for _ in 0..4 {
+                table.apply_abs(AbsAction::CheckCall, &abs);
+            }
+            assert_eq!(table.real.street(), Street::Turn);
+            table.apply_abs(AbsAction::AllIn, &abs); // p1 shoves the turn
+            assert_eq!(table.real.to_act(), 0);
+            let mut tracker = RangeTracker::new(2);
+            tracker.exclude(table.real.board());
+
+            let mut rng = SmallRng::seed_from_u64(11);
+            let a = policy.act_with_search(
+                &table.real,
+                &table.shadow,
+                &table.hist,
+                SearchParams {
+                    time_ms: 30_000,
+                    max_iters: 20_000,
+                    qre_lambda: None,
+                    safe_resolve: safe,
+                    adaptive: false,
+                },
+                &train_cfg,
+                Some(&tracker),
+                None,
+                &mut rng,
+            );
+            assert_eq!(
+                a,
+                AbsAction::CheckCall,
+                "made royal must call the turn shove (safe_resolve={safe})"
+            );
+        }
+    }
+
+    /// Continual resolving end to end: the bot's exact turn resolve must
+    /// populate the session carry, and its river decision must be able to
+    /// consume the carried CFVs as gadget alternatives (the line/river
+    /// lookup succeeds on the play path actually taken).
+    #[test]
+    fn turn_resolve_carries_cfvs_into_the_river_gadget() {
+        use crate::search::RangeTracker;
+        use crate::table::Table;
+        // Bot is p1 (first to act postflop) with a medium hand; we are p0.
+        let front = parse_cards("2c 7d Ah Kd Qs Js Ts 3h 4d").unwrap();
+        let mut deck = fresh_deck();
+        let mut used = [false; 52];
+        for (i, &c) in front.iter().enumerate() {
+            deck[i] = c;
+            used[c as usize] = true;
+        }
+        let mut idx = front.len();
+        for c in 0..52u8 {
+            if !used[c as usize] {
+                deck[idx] = c;
+                idx += 1;
+            }
+        }
+        let hand_cfg = HandConfig {
+            num_players: 2,
+            stack: 2_000,
+            sb: 50,
+            bb: 100,
+        };
+        let abs = Arc::new(abs_small());
+        let policy = Policy::new(
+            Blueprint {
+                strategies: HashMap::new(),
+                iterations: 0,
+                num_players: 2,
+                abs_cfg: AbsConfig::default(),
+                centroids: None,
+            },
+            abs.clone(),
+        );
+        let train_cfg = TrainConfig {
+            hand: hand_cfg.clone(),
+            prune_after: u64::MAX,
+            ..TrainConfig::default()
+        };
+        let params = SearchParams {
+            time_ms: 30_000,
+            max_iters: 20_000,
+            qre_lambda: None,
+            safe_resolve: true,
+            adaptive: false,
+        };
+        let mut table = Table::new(&hand_cfg, 0, deck);
+        for _ in 0..4 {
+            table.apply_abs(AbsAction::CheckCall, &abs);
+        }
+        assert_eq!(table.real.street(), Street::Turn);
+        assert_eq!(table.real.to_act(), 1, "bot (p1) opens the turn");
+
+        let mut tracker = RangeTracker::new(2);
+        tracker.exclude(table.real.board());
+        let mut session = SearchSession::new();
+        let mut rng = SmallRng::seed_from_u64(3);
+
+        // Bot's turn decision: must populate the carry.
+        let a1 = policy.act_with_search(
+            &table.real,
+            &table.shadow,
+            &table.hist,
+            params,
+            &train_cfg,
+            Some(&tracker),
+            Some(&mut session),
+            &mut rng,
+        );
+        assert!(session.carry.is_some(), "turn resolve must store the carry");
+        let root_len = session.root_hist_len;
+        assert_eq!(root_len, table.hist.len());
+        table.apply_abs(a1, &abs);
+        if table.real.street() == Street::Turn && table.real.to_act() == 0 {
+            // We call/check behind to close the turn.
+            table.apply_abs(AbsAction::CheckCall, &abs);
+        }
+        if table.real.is_terminal() || table.real.street() != Street::River {
+            panic!("rig must reach the river, bot chose {a1:?}");
+        }
+        assert_eq!(table.real.to_act(), 1, "bot opens the river");
+
+        // The exact lookup the river resolve performs must succeed on this
+        // line: the carried alternatives exist for the realized river card.
+        let alt = session
+            .river_alt(&table.real, &table.hist)
+            .expect("carried CFVs must cover the line actually played");
+        assert_eq!(alt.len(), crate::search::NUM_COMBOS);
+        assert!(alt.iter().all(|v| v.is_finite()));
+
+        // And the river decision itself completes through the gadget path.
+        let a2 = policy.act_with_search(
+            &table.real,
+            &table.shadow,
+            &table.hist,
+            params,
+            &train_cfg,
+            Some(&tracker),
+            Some(&mut session),
+            &mut rng,
+        );
+        let menu = abs.abstract_actions(&table.real);
+        assert!(menu.contains(&a2), "river action must be legal, got {a2:?}");
     }
 
     /// Nested re-solving of off-tree bets: the bot must price an off-tree
@@ -708,6 +991,7 @@ mod tests {
             params,
             &train_cfg,
             Some(&tracker),
+            None,
             &mut rng,
         );
         assert_eq!(a, AbsAction::Fold, "must fold at the real 800 price");
@@ -722,6 +1006,7 @@ mod tests {
             params,
             &train_cfg,
             Some(&tracker),
+            None,
             &mut rng,
         );
         assert_eq!(

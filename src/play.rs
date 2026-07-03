@@ -47,6 +47,7 @@ pub fn play(policy: &Policy, opts: &PlayOpts) {
         // Tracked ranges for every seat, Bayes-updated on each action; feeds
         // the bots' range-aware subgame search.
         let mut tracker = RangeTracker::new(n);
+        let mut session = crate::bot::SearchSession::new();
         let mut last_street = Street::Preflop;
         while !table.real.is_terminal() {
             if table.real.street() != last_street {
@@ -89,6 +90,7 @@ pub fn play(policy: &Policy, opts: &PlayOpts) {
                             params,
                             &train_cfg,
                             Some(&tracker),
+                            Some(&mut session),
                             &mut rng,
                         ),
                     _ => policy.act_blueprint(&table.shadow, &table.hist, &mut rng),
