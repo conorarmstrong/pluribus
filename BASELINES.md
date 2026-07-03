@@ -168,3 +168,20 @@ Fixed in `afbb08e` (collect-time re-expression of solver distributions
 onto the full blueprint menu by action identity; merge skips mismatches,
 never overwrites). gen1c (α=0.1, corrected) queued with the same gates.
 The original policy-purity concern remains open, now actually testable.
+
+### gen1c (corrected distill, α=0.1): safe, gain unproven
+
+- `distill --hands 10000 --search-ms 800 --alpha 0.1 --value-net
+  value_net.bin --seed 1` → 15,801 decisions, 9,505 infosets, 0 menu
+  mismatches
+
+| Gate | Result | Reference |
+|------|--------|-----------|
+| BR probe (`--hands 20000 --seed 1`) | **+484.5 ±321.6** | gen0: +475.4 ±320.6 |
+| Crossplay vs gen0 (200k hands) | +87.5 ±137.6 (not significant) | — |
+
+Reading: exploitability restored to baseline exactly — the corrupted
+gens' +1300 was entirely the menu bug, and no purity damage is visible
+at α=0.1. Head-to-head is positive but underpowered at this coverage.
+gen1d queued as the definitive test: 50k hands, α=0.5, 1M-hand
+crossplay (±60 CI).
