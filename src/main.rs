@@ -76,6 +76,10 @@ enum Cmd {
         /// --strat-prev pointing at the same file.
         #[arg(long)]
         strategic_from: Option<String>,
+        /// Traversal RNG seed: distinct seeds give independent self-play
+        /// runs (equilibrium-selection studies).
+        #[arg(long, default_value_t = 0)]
+        train_seed: u64,
         /// Restricted Nash response: opponent model (random | caller).
         #[arg(long)]
         rnr_model: Option<Baseline>,
@@ -226,6 +230,19 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
+    /// Cross-play two blueprints: --focal in one rotating seat against a
+    /// full table of --field. If self-play equilibria were interchangeable,
+    /// the result would be ~0 — the multiplayer equilibrium-selection probe.
+    Crossplay {
+        #[arg(long)]
+        focal: String,
+        #[arg(long)]
+        field: String,
+        #[arg(long, default_value_t = 200_000)]
+        hands: u64,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
     /// Print blueprint statistics.
     Inspect {
         #[arg(long, default_value = "blueprint.bin")]
@@ -256,6 +273,7 @@ fn main() {
             kmeans_samples,
             raw_buckets,
             strategic_from,
+            train_seed,
             rnr_model,
             rnr_p,
             no_prune,
@@ -279,6 +297,7 @@ fn main() {
                     ..HandConfig::default()
                 },
                 prune_after: if no_prune { u64::MAX } else { 200_000 },
+                seed: train_seed,
                 ..TrainConfig::default()
             };
             let trainer = match &resume {
@@ -619,6 +638,29 @@ fn main() {
             println!(
                 "value net saved to {out} (final val loss {val_loss:.5}, {:.0}s)",
                 started.elapsed().as_secs_f64()
+            );
+        }
+
+        Cmd::Crossplay {
+            focal,
+            field,
+            hands,
+            seed,
+        } => {
+            let focal_p = load_policy(&focal);
+            let field_p = load_policy(&field);
+            if focal_p.blueprint.num_players != field_p.blueprint.num_players {
+                die("blueprints trained for different table sizes");
+            }
+            let cfg = HandConfig {
+                num_players: focal_p.blueprint.num_players,
+                ..HandConfig::default()
+            };
+            println!("cross-play: {focal} (1 seat) vs {field} (rest), {hands} hands...");
+            let r = table::run_crossplay(&focal_p, &field_p, &cfg, hands, seed);
+            println!(
+                "focal winrate: {:+.1} mbb/hand (95% CI ±{:.1}) over {} hands",
+                r.mbb_per_hand, r.ci95, r.hands
             );
         }
 

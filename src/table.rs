@@ -200,6 +200,49 @@ pub fn run_eval(
     }
 }
 
+/// Cross-play: one "focal" policy in a rotating hero seat against a table
+/// of a DIFFERENT policy, duplicate-style deals. Measures how well one
+/// self-play equilibrium fares inside another's population — the
+/// multiplayer equilibrium-selection question: if the two runs converged
+/// to interchangeable equilibria, cross-play is ~0 by symmetry.
+pub fn run_crossplay(
+    focal: &Policy,
+    field: &Policy,
+    cfg: &HandConfig,
+    hands: u64,
+    seed: u64,
+) -> EvalResult {
+    let n = cfg.num_players;
+    let results: Vec<f64> = (0..hands)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng = SmallRng::seed_from_u64(seed ^ i.wrapping_mul(0x2545_F491_4F6C_DD1D));
+            let hero = (i % n as u64) as usize;
+            let button = rng.random_range(0..n);
+            let mut deck = fresh_deck();
+            deck.shuffle(&mut rng);
+            let mut table = Table::new(cfg, button, deck);
+            let mut guard = 0;
+            while !table.real.is_terminal() {
+                guard += 1;
+                assert!(guard < 500, "crossplay hand did not terminate");
+                let p = table.real.to_act();
+                let pol = if p == hero { focal } else { field };
+                let a = pol.act_blueprint(&table.shadow, &table.hist, &mut rng);
+                table.apply_abs(a, &pol.abs);
+            }
+            table.real.utilities()[hero] as f64 / cfg.bb as f64 * 1000.0
+        })
+        .collect();
+
+    let (mean, ci95) = mean_ci(&results);
+    EvalResult {
+        hands,
+        mbb_per_hand: mean,
+        ci95,
+    }
+}
+
 /// Search-mode evaluation: the hero plays with full range-tracked online
 /// resolving (`act_with_search`) instead of raw blueprint lookups — the
 /// only way to measure what search adds. Much slower than `run_eval`;

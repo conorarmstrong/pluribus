@@ -38,6 +38,9 @@ pub struct TrainConfig {
     pub prune_prob: f64,
     /// Iterations before pruning activates.
     pub prune_after: u64,
+    /// Traversal RNG seed — distinct seeds give independent self-play runs
+    /// (equilibrium-selection studies).
+    pub seed: u64,
 }
 
 impl Default for TrainConfig {
@@ -47,6 +50,7 @@ impl Default for TrainConfig {
             prune_threshold: -3.0e8,
             prune_prob: 0.95,
             prune_after: 200_000,
+            seed: 0,
         }
     }
 }
@@ -194,7 +198,8 @@ impl Trainer {
         let n = self.cfg.hand.num_players;
         (0..iterations).into_par_iter().for_each(|i| {
             let t = start + i + 1;
-            let mut rng = SmallRng::seed_from_u64(t.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut rng =
+                SmallRng::seed_from_u64(t.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.cfg.seed);
             let traverser = (t % n as u64) as usize;
             let mut deck = fresh_deck();
             deck.shuffle(&mut rng);
