@@ -149,3 +149,22 @@ Follow-ups worth testing before abandoning policy space entirely:
 low α (≤0.1) + minimum-sample thresholds per key. Primary path forward:
 value-space flywheel (regenerate turn data under current search
 conditions, retrain/scale the net).
+
+### Correction (same day): gen1's failure was a distill BUG, not (yet)
+### evidence against policy distillation
+
+The α=0.1 falsification run (bp_gen1b) came back **α-independent**:
+BR +1387.8 ±350.2, crossplay +82.6 ±137.9 — statistically identical to
+α=0.5. A 5× smaller blend should have produced ~5× less damage; it
+produced none less. Diagnosis: the merge's overwrite-on-length-mismatch
+rule. The slim-menu solvers (turn: 4 actions, flop-net: 5) returned
+distributions shorter than the blueprint's full-menu entries, so nearly
+every turn/flop distillation REPLACED a full-menu strategy with a short
+vector — and a length-mismatched entry falls back to pure check/call at
+play time. The distillation had been quietly converting the bot's most
+common postflop infosets into a calling station; α never mattered.
+
+Fixed in `afbb08e` (collect-time re-expression of solver distributions
+onto the full blueprint menu by action identity; merge skips mismatches,
+never overwrites). gen1c (α=0.1, corrected) queued with the same gates.
+The original policy-purity concern remains open, now actually testable.
