@@ -58,6 +58,10 @@ training exactly.
 | `--runouts` | 24 | Sampled future boards per flop/turn distribution |
 | `--kmeans-samples` | 30,000 | Situations sampled per street for clustering |
 | `--raw-buckets` | off | Plain equity quantization instead of k-means |
+| `--strategic-from <file>` | – | Co-train: cluster by a previous blueprint's play instead of equity |
+| `--train-seed` | 0 | Traversal RNG seed (distinct seeds → independent self-play runs) |
+| `--rnr-model` | – | Restricted Nash response opponent model (`random`\|`caller`) |
+| `--rnr-p` | 0.5 | RNR mixture weight, 0=equilibrium, 1=pure best response; needs `--rnr-model` |
 | `--no-prune` | off | Disable negative-regret pruning |
 | `--threads` | all cores | Worker threads |
 
@@ -108,6 +112,12 @@ that imperfect opponent — an exploitation mode that wins more against
 weak opposition at the cost of theoretical balance. Omit for equilibrium
 play.
 
+`--adaptive-search` (opt-in metareasoning): spends 1/8 of the time budget
+on a quick probe solve, then stops early if the root strategy is already
+near-pure (max action probability ≥ 0.97) — more compute cannot change a
+decision that is already settled. Otherwise it continues to the full
+budget. Saves wall-clock on lopsided decisions without changing play.
+
 ### `eval`
 Plays the blueprint (one rotating seat) against baseline opponents in every
 other seat and reports the winrate in **mbb/hand** (milli-big-blinds per hand)
@@ -124,6 +134,33 @@ menu), `caller` (always check/call). Two variance-reduction modes:
   function; ours is exact on the river, which cancels all showdown luck.
   Halves the CI at equal hands (≈4× fewer hands for equal precision).
 
+`--search` (with `--search-ms`, `--value-net`) has the hero use the same
+online subgame resolving as `play --search` instead of raw blueprint
+lookups. `--search-gain` and `--net-gain` are paired modes for isolating
+the value search and the value net each add (see Research experiments).
+`--strat-prev <file>` points at the previous blueprint when evaluating a
+strategic-abstraction blueprint (see `train --strategic-from`).
+
+### `br`
+A tighter exploitability lower bound than `lbr`: the same harness and
+exact-Bayes range tracking, but every turn and river decision plays an
+**exact best response of the entire remaining game** — a single expectimax
+pass over the full-menu betting tree (turn decisions include the explicit
+river chance node and the full river tree beneath it). The bot is a fixed,
+known strategy, so one pass is exact; no CFR iterations, no convergence
+error. Preflop and flop decisions fall back to the greedy LBR action (a
+full-game exact BR is intractable: chance branching over boards puts it
+at ~1e13 vector node-visits). Deterministic given a seed, so two code
+versions can be compared on identical deals.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--blueprint` | blueprint.bin | Blueprint to probe |
+| `--hands` | 2,000 | Hands played |
+| `--runouts` | 100 | Equity runouts on the greedy (preflop/flop) streets |
+| `--strat-prev` | – | Previous blueprint for strategic-abstraction lookups |
+| `--seed` | 1 | RNG seed |
+
 ### `lbr`
 **Local Best Response** (Lisý & Bowling 2017): a lower bound on the
 blueprint's exploitability. The LBR agent knows the bot's exact policy — it
@@ -131,7 +168,9 @@ tracks the bot's range with exact Bayes updates and greedily best-responds
 using fold equity plus showdown equity against the tracked range under a
 check/call-down assumption. Runs heads-up blind-vs-blind inside the
 blueprint's native game (other seats fold), alternating blind seats. Reports
-LBR's winnings in mbb/hand: 0 = unexploited by this probe.
+LBR's winnings in mbb/hand: 0 = unexploited by this probe. `--runouts`
+(default 100) sets board completions sampled per equity estimate;
+`--strat-prev` is the same strategic-abstraction lookup as above.
 
 ### `benchmark`
 Replays all 10,000 hands the real Pluribus played in the Science 2019
@@ -141,6 +180,63 @@ engine — the replay is validated chip-for-chip against the logged finishing
 stacks — and, at every decision Pluribus made, reports how much probability
 our blueprint puts on the action Pluribus chose and how often it is our
 top action, per street.
+
+### `ablate-safety`
+The safety ablation behind the `--safe-resolve` numbers above: for
+`--spots` random river spots, corrupts the tracked belief at a sweep of
+noise levels ε and compares the opponent's best-response margin beyond its
+safety value for unsafe vs. gadget (safe) resolving. `--iters` sets the
+vector-CFR iterations per resolve.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--spots` | 40 | Random river spots sampled |
+| `--iters` | 400 | Vector-CFR iterations per resolve |
+| `--seed` | 1 | RNG seed |
+
+### `gen-turn-data` / `train-value-net`
+Build the belief-state value network consumed by `play --value-net`:
+`gen-turn-data` plays the blueprint against itself, reaches turn-street
+starts with Bayes-tracked ranges, and solves each one exactly with the turn
+solver (`turn.rs`) to produce `(board, pot, stacks, ranges) → per-combo
+values` training pairs; `train-value-net` fits an MLP (`net.rs`) to them.
+
+| Flag (`gen-turn-data`) | Default | Meaning |
+|------|---------|---------|
+| `--blueprint` | blueprint.bin | Blueprint to self-play |
+| `--out` | turn_data.bin | Output training data |
+| `--samples` | 10,000 | Turn spots to solve |
+| `--solve-iters` | 200 | Vector-CFR iterations per exact turn solve |
+| `--solve-ms` | 30,000 | Per-solve wall-clock cap |
+| `--seed` | 1 | RNG seed |
+
+| Flag (`train-value-net`) | Default | Meaning |
+|------|---------|---------|
+| `--data` | turn_data.bin | Training data from `gen-turn-data` |
+| `--out` | value_net.bin | Output network |
+| `--hidden` | 512,512 | Hidden layer sizes, comma-separated |
+| `--epochs` | 50 | Training epochs |
+| `--lr` | 1e-3 | Adam learning rate |
+| `--batch` | 128 | Minibatch size |
+| `--seed` | 1 | RNG seed |
+
+### `crossplay`
+Cross-plays two blueprints: `--focal` occupies one rotating seat against a
+full table of `--field`. The equilibrium-selection probe — if independent
+self-play equilibria were interchangeable, every cross-play direction (and
+the self-play sanity cell) should land near 0 mbb/hand.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--focal` | – | Blueprint in the rotating hero seat |
+| `--field` | – | Blueprint filling the other seats |
+| `--strat-prev` | – | Previous blueprint for strategic-abstraction lookups |
+| `--hands` | 200,000 | Hands played |
+| `--seed` | 1 | RNG seed |
+
+### `inspect`
+Prints blueprint statistics: trained iteration count, player count, and
+infoset counts overall and per street.
 
 ## Architecture
 
@@ -159,17 +255,35 @@ src/
 ├── cfr.rs          External-sampling Linear MCCFR: parallel (rayon+dashmap),
 │                   negative-regret pruning, CFR+ mode for subgames,
 │                   depth-limited leaves with biased continuation strategies,
-│                   logit-QRE opponent modeling, checkpoints, blueprint export
+│                   logit-QRE opponent modeling, restricted Nash response,
+│                   checkpoints, blueprint export
 ├── search.rs       RangeTracker: per-seat Bayes-updated weights over all 1326
 │                   combos; range-weighted hidden-card sampling for resolving
 ├── river.rs        Exact river resolving: vector CFR+ over both tracked
-│                   ranges, O(N) showdown sweep with blocker effects
+│                   ranges, O(N) showdown sweep with blocker effects, and the
+│                   adaptive (metareasoning) early-exit staged solve
+├── turn.rs         Exact turn resolving: vector CFR+ over the turn tree, an
+│                   explicit river-card chance node, and the river tree
+│                   beneath each — one street deeper than river.rs
+├── flop.rs         Depth-limited flop resolving: vector CFR+ over the flop
+│                   tree, truncated at end-of-flop leaves valued by the
+│                   belief-state value network (ReBeL search architecture)
+├── net.rs          Dependency-free ReLU MLP (weighted-MSE loss, Adam),
+│                   gradient-checked against finite differences
+├── valuenet.rs     Belief-state value network (ReBeL-lite): turn-state
+│                   leaf evaluator trained on turn.rs's exact solves
+├── portfolio.rs    UCB1 bandit over a portfolio of blueprints (equilibrium
+│                   + restricted-Nash-response exploiters)
+├── ablate.rs       Safety ablation: unsafe vs gadget river resolving under
+│                   corrupted range beliefs
 ├── bot.rs          Table policy: blueprint lookup + range-tracked
 │                   depth-limited subgame resolving
 ├── table.rs        Real hand + abstract "shadow" hand + history tracking;
 │                   off-tree bet mapping; eval harness (plain + duplicate)
 ├── aivat.rs        AIVAT variance-reduced unbiased winrate estimator
 ├── lbr.rs          Local Best Response exploitability lower bound
+├── br.rs           Exact-subgame best response probe: LBR harness with
+│                   true turn/river best response (tighter lower bound)
 ├── benchmark.rs    PHH parser + replay vs the real Pluribus's 10,000 hands
 ├── play.rs         Interactive terminal game (feeds the range tracker)
 └── main.rs         CLI (clap)
@@ -189,7 +303,10 @@ Centroids are trained once per blueprint and serialized with it. All cached
 equity work is shared across **suit isomorphism** classes: on a cache miss
 the (hole, board) pair is canonicalized to the lexicographic minimum over
 the 24 suit relabelings, so up to 24 strategically identical hands share one
-Monte Carlo computation.
+Monte Carlo computation. Monte Carlo draws are seeded from the canonical
+key itself, so a given (hole, board) always produces the same estimate —
+and the same bucket — in every process, thread interleaving, and cache
+state.
 
 **Blueprint (offline).** Each iteration deals a random hand and runs one
 external-sampling MCCFR traversal for one player: the traverser explores its
@@ -209,7 +326,7 @@ tracked ranges (see `play` above).
 
 ## Correctness
 
-The project is TDD-built with 68 tests:
+The project is TDD-built with 96 tests:
 
 - evaluator: category spot checks, ordering checks, and a 30k-hand
   differential test against an independent naive evaluator
@@ -221,20 +338,43 @@ The project is TDD-built with 68 tests:
   properties (a flush draw's distribution is measurably wider than a made
   pair's), k-medians recovery of known clusters, monster-vs-air bucket
   separation under trained centroids, suit-isomorphism canonicalization
-  (including the mirror cases first-appearance schemes miss)
+  (including the mirror cases first-appearance schemes miss), strategic
+  (play-based) centroids bucket hands by realized action
 - river solver: the O(N) showdown sweep is differentially tested against a
   naive O(N^2) evaluator; the nuts call a shove and air folds; strategies
   are proper distributions; a lambda=0 QRE solve bets far more than the
-  equilibrium solve against the same ranges
+  equilibrium solve against the same ranges; the adaptive staged solve exits
+  early only when the root strategy is already near-pure
+- turn/flop solvers: the turn solver builds a multi-street tree with
+  zero-sum, normalized root values (a made royal calls a shove for full
+  pot); the flop solver's leaf-sampled and full-solve root strategies both
+  normalize
+- value network: the MLP's analytic gradients match central finite
+  differences and it overfits a tiny nonlinear dataset (save/load
+  round-trips); the belief-state encoding has the right shape and
+  normalization, sample generation is valid, and training measurably
+  reduces loss
 - QRE: lambda=0 is uniform, large lambda approaches argmax; CFR+ subgame
   regrets stay nonnegative
 - CFR: a 10bb heads-up push/fold training run must reproduce known-correct
   strategy (AA calls a shove, 32o folds, the button never folds AA);
-  continuation-bias math; checkpoint/blueprint round-trips including centroids
+  continuation-bias math; checkpoint/blueprint round-trips including
+  centroids; restricted Nash response measurably exploits the modeled
+  opponent
 - search: range tracking concentrates on the hands that would take the
   observed action; sampling respects weights and card-removal conflicts; a
   rigged nuts-on-the-river resolve must call >90%; a range-tracked,
   depth-limited flop resolve trains a valid root strategy
+- portfolio & safety ablation: against a calling station, the UCB1 bandit
+  converges to the RNR arm and outscores the equilibrium arm alone; the
+  safety ablation confirms gadget resolving bounds the opponent's
+  best-response margin under corrupted beliefs while unsafe resolving does
+  not
+- BR probe: a made royal facing a turn shove must value exactly +2000
+  (single exact pass — float-noise tolerance, not CFR convergence); the
+  probe must plan multi-street stack extraction (check turn, shove river);
+  net fold values are exact; results reproduce bit-for-bit under a fixed
+  seed; and the walk rejects wrong streets and multiway spots
 - benchmark: PHH parsing, replay in lockstep with the engine, exact chip
   accounting on a real logged hand (and 9,992/9,992 checkable hands of the
   full dataset reproduce their logged finishing stacks exactly)
@@ -339,7 +479,11 @@ experiments (all reproducible from the CLI):
 - Subgame roots trust the blueprint's action menu; there is no re-solving of
   earlier streets when an opponent's line goes far off-tree (the shadow-hand
   mapping absorbs it instead).
-- No opponent modeling / exploitation layer (neither had Pluribus).
+- Opponent modeling is offline and model-based, not adaptive: restricted
+  Nash response (`--rnr-model`) and the portfolio bandit (`portfolio.rs`)
+  exploit a small set of pre-specified, pre-trained opponent models (random,
+  caller) chosen ahead of time. There is no online estimation of an unknown
+  live opponent's tendencies from observed play (neither had Pluribus).
 
 ## References
 
@@ -365,5 +509,9 @@ experiments (all reproducible from the CLI):
   AAAI 2018
 - Ganzfried & Sandholm, "Potential-Aware Imperfect-Recall Abstraction with
   Earth Mover's Distance in Imperfect-Information Games", AAAI 2014
+- Johanson, Zinkevich & Bowling, "Computing Robust Counter-Strategies",
+  NeurIPS 2007 (restricted Nash response, `--rnr-model`/`--rnr-p`)
+- Auer, Cesa-Bianchi & Fischer, "Finite-time Analysis of the Multiarmed
+  Bandit Problem", Machine Learning 47, 2002 (UCB1, the portfolio bandit)
 - uoftcprg/phh-dataset — Poker Hand History format; the 10,000 Pluribus
   hands used by `benchmark`

@@ -430,12 +430,19 @@ impl Abstraction {
             4 => self.centroids.as_ref().map(|c| &c.turn),
             _ => None,
         };
+        // Monte Carlo draws are seeded from the canonical key, not the
+        // caller's rng: the same (hole, board) always gets the same
+        // estimate (and therefore the same bucket, even after an eviction),
+        // and a cache miss never consumes caller draws — bucketing is
+        // deterministic regardless of thread timing or cache state.
+        let _ = rng;
+        let mut krng = SmallRng::seed_from_u64(ckey ^ 0xD1CE_5EED_0BAD_F00D);
         let b = match street_cents {
             Some(cents) if cents.first().map(|v| v.len()) != Some(QUANTILES) => {
                 let sc = self.strat.as_ref().expect(
                     "strategic centroids need the previous blueprint (--strat-prev)",
                 );
-                let f = strategic_fingerprint(sc, hole, board, rng);
+                let f = strategic_fingerprint(sc, hole, board, &mut krng);
                 nearest_centroid(&f, cents)
             }
             Some(cents) => {
@@ -444,12 +451,12 @@ impl Abstraction {
                     board,
                     self.cfg.dist_runouts,
                     self.cfg.runout_rollouts,
-                    rng,
+                    &mut krng,
                 );
                 nearest_centroid(&q, cents)
             }
             None => {
-                let eq = equity_vs_random(hole, board, self.cfg.equity_rollouts, rng);
+                let eq = equity_vs_random(hole, board, self.cfg.equity_rollouts, &mut krng);
                 ((eq * nb as f64) as u16).min(nb - 1)
             }
         };

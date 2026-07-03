@@ -3,6 +3,7 @@ mod abstraction;
 mod aivat;
 mod benchmark;
 mod bot;
+mod br;
 mod cards;
 mod cfr;
 mod engine;
@@ -162,6 +163,24 @@ enum Cmd {
         /// Belief-state value net for ReBeL flop solving (with --search).
         #[arg(long)]
         value_net: Option<String>,
+        /// Previous blueprint for strategic-abstraction lookups.
+        #[arg(long)]
+        strat_prev: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
+    /// Tighter exploitability lower bound than `lbr`: same harness, but
+    /// turn and river decisions play an exact best response of the whole
+    /// remaining game (single expectimax pass, deterministic per seed).
+    Br {
+        #[arg(long, default_value = "blueprint.bin")]
+        blueprint: String,
+        #[arg(long, default_value_t = 2_000)]
+        hands: u64,
+        /// Board completions per equity estimate on the greedy (preflop/
+        /// flop) streets.
+        #[arg(long, default_value_t = 100)]
+        runouts: u32,
         /// Previous blueprint for strategic-abstraction lookups.
         #[arg(long)]
         strat_prev: Option<String>,
@@ -546,6 +565,35 @@ fn main() {
                 started.elapsed().as_secs_f64()
             );
             println!("(lower bound on the blueprint's exploitability; 0 = unexploited)");
+        }
+
+        Cmd::Br {
+            blueprint,
+            hands,
+            runouts,
+            strat_prev,
+            seed,
+        } => {
+            let policy = load_policy_strat(&blueprint, strat_prev.as_deref());
+            let cfg = HandConfig {
+                num_players: policy.blueprint.num_players,
+                ..HandConfig::default()
+            };
+            println!(
+                "BR probe: {hands} hands blind-vs-blind ({}-max game), exact \
+                 turn/river subgame best response...",
+                cfg.num_players
+            );
+            let started = std::time::Instant::now();
+            let r = br::run_br(&policy, &cfg, hands, runouts, seed);
+            println!(
+                "BR probe wins {:+.1} mbb/hand (95% CI ±{:.1}) over {} hands in {:.1}s",
+                r.mbb_per_hand,
+                r.ci95,
+                r.hands,
+                started.elapsed().as_secs_f64()
+            );
+            println!("(tighter lower bound on exploitability than lbr; 0 = unexploited)");
         }
 
         Cmd::AblateSafety { spots, iters, seed } => {

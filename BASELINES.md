@@ -1,0 +1,103 @@
+# Baselines
+
+Frozen measurement records for later comparison. Append a new section per
+baseline; never edit an old one. Artifacts are gitignored, so the SHA-256
+hashes below are the only durable link between these numbers and the
+binaries that produced them — verify with `shasum -a 256 <file>` before
+trusting a comparison.
+
+## 2026-07 — 200M-iteration blueprint (pre-research-programme reference)
+
+- Code: commit `fae2399404422d000814c2b7eae2eab02877d496` (2026-07-03)
+- Toolchain: rustc 1.90.0, `--release` (lto, codegen-units=1)
+- Hardware: 16 cores (Apple Silicon, Darwin 25.5.0)
+- Tests at time of record: 90/90 passing
+
+### Artifacts
+
+| File | SHA-256 | Size (bytes) | Produced by |
+|------|---------|--------------|-------------|
+| blueprint.bin | `ff74852ca3aaf4cefda307605569f8eeb868b0bd78eb752f97c791537e9f3eb1` | 4,343,417,226 | `train --iters 200000000 --out blueprint.bin` |
+| bp_equity30.bin | `e1fab58dd8864e62f0dded858ed25f1d19afaec44cdd2c4a3abdfb74913cda58` | 2,213,011,970 | `train --iters 30000000 --out bp_equity30.bin` |
+| bp_seed1.bin | `0f730ec06427a84d05402fb3516087f06af191d598446d6d113832ab1ba4c67f` | 2,204,175,907 | `train --iters 30000000 --train-seed 1 --out bp_seed1.bin` |
+| bp_seed2.bin | `85c969b9553f7d4fdb88e215c5c1b524953b503ae119412c42615ad383ee4249` | 2,186,197,567 | `train --iters 30000000 --train-seed 2 --out bp_seed2.bin` |
+| bp_strat30.bin | `44598bf6f6b4bb07bf3e9d5bf22f479775ecf37f4e068f20919f023bd2b1504b` | 2,141,672,873 | `train --iters 30000000 --strategic-from bp_equity30.bin --out bp_strat30.bin` |
+| turn_data.bin | `6036f24b42e5e6c4c67517fa8dbc03a7b0db1caed32245405f3b6acbe18d2cfa` | 425,440,008 | `gen-turn-data --blueprint blueprint.bin --samples 20000` |
+| value_net.bin | `0e59296c2a3a5f22e62f1e0ad542463912a8d079dc7e3878699b945f32efcabf` | 12,038,616 | `train-value-net --data turn_data.bin --hidden 512,512` |
+| value_net_256.bin | `0031ab712a878422421c73a9fc8238c34abce555966d6060157e5df5b37ebd9c` | 5,762,520 | `train-value-net --data turn_data.bin --hidden 256,256` |
+
+blueprint.bin: 101,022,969 exported strategies (preflop 19,912,089 /
+flop 20,169,606 / turn 27,164,266 / river 33,777,008), 12 EMD k-means
+buckets/street, 6 players, trained in 79 minutes.
+
+### Metrics
+
+| Metric | Value | Command |
+|--------|-------|---------|
+| vs random, plain | +4426 ±334 mbb/hand | `eval --blueprint blueprint.bin --hands 200000 --baseline random` |
+| vs caller, plain | +3735 ±371 mbb/hand | `eval --blueprint blueprint.bin --hands 200000 --baseline caller` |
+| vs random, AIVAT | +4285 ±273 mbb/hand | `eval --blueprint blueprint.bin --hands 100000 --baseline random --aivat` |
+| vs caller, AIVAT | +3704 ±260 mbb/hand | `eval --blueprint blueprint.bin --hands 100000 --baseline caller --aivat` |
+| LBR exploitability lower bound | +366 ±322 mbb/hand | `lbr --blueprint blueprint.bin --hands 20000` |
+| Search gain (net leaves vs rollout leaves) | +313 ±198 mbb/hand | `eval --net-gain --value-net value_net.bin --search-ms 800 --hands 12000` |
+| Search+net gain vs raw blueprint | +331 ±213 mbb/hand | `eval --search-gain --value-net value_net.bin --search-ms 800 --hands 12000` |
+| Search gain without net, 800ms | −55 ±495 mbb/hand | `eval --search-gain --search-ms 800 --hands 12000` |
+| Search gain without net, 150ms | −520 ±399 mbb/hand | `eval --search-gain --search-ms 150 --hands 12000` |
+| Value net validation loss | 0.00089 weighted MSE (≈3% RMS of max swing) | `train-value-net --data turn_data.bin --hidden 512,512` |
+| Pluribus top-1 agreement (overall) | 66.8% (15,169 decisions, 99.0% covered) | `benchmark --blueprint blueprint.bin --dir data/pluribus` |
+| Pluribus agreement by street | 75.6% / 49.9% / 46.0% / 44.3% (pre/flop/turn/river) | same |
+| Pluribus mean action probability | 0.599 | same |
+| Replay chip accounting | 9,992/9,992 hands exact | same |
+| Crossplay (3 seeds × 6 directions, 200k hands each) | all cells within ±80 mbb/hand of 0 (CIs ±245) | `crossplay --focal ... --field ...` |
+| Strategic vs equity abstraction, head-to-head | ≈ 0 ±246 both directions | `crossplay --focal bp_strat30.bin --field bp_equity30.bin --strat-prev bp_equity30.bin` |
+
+Benchmark and inspect rows re-verified 2026-07-03 against
+`blueprint.bin` (`ff74852c…`): identical output.
+
+### Known caveats frozen into this baseline
+
+- LBR CI (±322) is nearly as large as the measurement; treat it as
+  order-of-magnitude only until an exact best-response metric exists.
+- Eval baselines are `random`/`caller` only — winrates are not comparable
+  to human-pool or cross-bot winrates.
+- Search-gain rows used 800ms/decision on this hardware; budget and
+  hardware changes shift them.
+
+## 2026-07-03 — Phase 0: BR probe (exact turn/river subgame best response)
+
+- Code: working tree after `fae2399` (br probe + canonical-key-seeded
+  equity draws; not yet committed at time of record)
+- Tests at time of record: 96/96 passing
+- Blueprint: blueprint.bin `ff74852c…` (the 200M baseline above)
+
+New measurement command: `br` — LBR's harness, but every turn and river
+decision plays an exact best response of the entire remaining game (single
+expectimax pass, full menus, no CFR convergence error). Sound lower bound,
+strictly tighter than LBR in expectation, bit-for-bit reproducible per
+seed. Preflop/flop still use the greedy LBR action (full-game exact BR
+≈ 1e13 vector node-visits — intractable).
+
+Also in this change: Monte Carlo equity draws are now seeded from the
+canonical (hole, board) key instead of the caller's rng — bucketing is
+identical across processes, thread interleavings, and cache evictions.
+LBR re-measured under the new code for a same-code comparison.
+
+| Metric | Value | Command |
+|--------|-------|---------|
+| BR probe exploitability lower bound | **+475.4 ±320.6 mbb/hand** (20k hands, 314s) | `br --blueprint blueprint.bin --hands 20000 --seed 1` |
+| LBR (same code, for comparison) | +301.3 ±321.3 mbb/hand (20k hands, 76s) | `lbr --blueprint blueprint.bin --hands 20000 --seed 1` |
+
+Reading: the stronger probe tightens the lower bound by ~+174 mbb/hand at
+the point estimate (CIs overlap; the probes are not per-deal paired — they
+draw different deal sequences). This is the Phase 0 reference number for
+gating Phase 1: nested safe re-solving and continual resolving should push
+the BR probe number down measurably on this same seed.
+
+### Caveats
+
+- The probe is exact only from the turn; preflop/flop still greedy, so
+  the true exploitability is higher than this bound.
+- CI is still deal-noise dominated (±320 at 20k hands); scale `--hands`
+  or add duplicate dealing to the probe before reading small deltas.
+- The probes measure the RAW blueprint. Online search is not probed yet;
+  Phase 1 should add a `br`-vs-search mode.
