@@ -125,6 +125,16 @@ enum Cmd {
         /// terms (Burch et al. 2018) — strongest variance reduction.
         #[arg(long)]
         aivat: bool,
+        /// Hero uses range-tracked online search per decision (slow;
+        /// combine with --search-ms).
+        #[arg(long)]
+        search: bool,
+        /// Per-decision search budget in milliseconds (with --search).
+        #[arg(long, default_value_t = 100)]
+        search_ms: u64,
+        /// Belief-state value net for ReBeL flop solving (with --search).
+        #[arg(long)]
+        value_net: Option<String>,
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
@@ -361,9 +371,18 @@ fn main() {
             players,
             duplicate,
             aivat,
+            search,
+            search_ms,
+            value_net,
             seed,
         } => {
-            let policy = load_policy(&blueprint);
+            let net = value_net.map(|p| {
+                let n = valuenet::ValueNet::load(&p)
+                    .unwrap_or_else(|e| die(&format!("cannot load value net '{p}': {e}")));
+                println!("loaded value net from {p}");
+                Arc::new(n)
+            });
+            let policy = load_policy(&blueprint).with_value_net(net);
             let cfg = HandConfig {
                 num_players: players,
                 ..HandConfig::default()
@@ -373,7 +392,9 @@ fn main() {
                 hands,
                 baseline,
                 players,
-                if aivat {
+                if search {
+                    ", with search"
+                } else if aivat {
                     ", AIVAT"
                 } else if duplicate {
                     ", duplicate deals"
@@ -382,7 +403,14 @@ fn main() {
                 }
             );
             let started = std::time::Instant::now();
-            let r = if aivat {
+            let r = if search {
+                let params = SearchParams {
+                    time_ms: search_ms,
+                    adaptive: true,
+                    ..SearchParams::default()
+                };
+                table::run_eval_search(&policy, &cfg, baseline, hands, params, seed)
+            } else if aivat {
                 aivat::run_eval_aivat(&policy, &cfg, baseline, hands, seed)
             } else if duplicate {
                 table::run_eval_duplicate(&policy, &cfg, baseline, hands / players as u64, seed)

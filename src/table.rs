@@ -200,6 +200,71 @@ pub fn run_eval(
     }
 }
 
+/// Search-mode evaluation: the hero plays with full range-tracked online
+/// resolving (`act_with_search`) instead of raw blueprint lookups — the
+/// only way to measure what search adds. Much slower than `run_eval`;
+/// use a small per-decision budget.
+pub fn run_eval_search(
+    policy: &Policy,
+    cfg: &HandConfig,
+    baseline: Baseline,
+    hands: u64,
+    params: crate::bot::SearchParams,
+    seed: u64,
+) -> EvalResult {
+    use crate::search::RangeTracker;
+    let n = cfg.num_players;
+    let train_cfg = crate::cfr::TrainConfig {
+        hand: cfg.clone(),
+        prune_after: u64::MAX,
+        ..crate::cfr::TrainConfig::default()
+    };
+    let results: Vec<f64> = (0..hands)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng = SmallRng::seed_from_u64(seed ^ i.wrapping_mul(0x2545_F491_4F6C_DD1D));
+            let hero = (i % n as u64) as usize;
+            let button = rng.random_range(0..n);
+            let mut deck = fresh_deck();
+            deck.shuffle(&mut rng);
+            let mut table = Table::new(cfg, button, deck);
+            let mut tracker = RangeTracker::new(n);
+            let mut guard = 0;
+            while !table.real.is_terminal() {
+                guard += 1;
+                assert!(guard < 500, "search eval hand did not terminate");
+                let p = table.real.to_act();
+                let a = if p == hero {
+                    policy.act_with_search(
+                        &table.shadow,
+                        &table.hist,
+                        params,
+                        &train_cfg,
+                        Some(&tracker),
+                        &mut rng,
+                    )
+                } else {
+                    baseline_action(baseline, &table.shadow, &policy.abs, &mut rng)
+                };
+                tracker.observe(p, a, &table.shadow, &table.hist, &policy.blueprint, &policy.abs);
+                let street_before = table.real.street();
+                table.apply_abs(a, &policy.abs);
+                if table.real.street() != street_before {
+                    tracker.exclude(table.real.board());
+                }
+            }
+            table.real.utilities()[hero] as f64 / cfg.bb as f64 * 1000.0
+        })
+        .collect();
+
+    let (mean, ci95) = mean_ci(&results);
+    EvalResult {
+        hands,
+        mbb_per_hand: mean,
+        ci95,
+    }
+}
+
 /// Duplicate evaluation (ACPC-style variance reduction): each sampled deal
 /// (deck + button) is played `num_players` times with the hero rotated
 /// through every seat, and the deal's score is the mean over rotations —
@@ -347,6 +412,25 @@ mod tests {
             "plain eval should be noisy here, got ±{}",
             plain.ci95
         );
+    }
+
+    /// Search-mode eval smoke: hero resolves with a range tracker on every
+    /// decision; the harness must terminate and produce a finite estimate.
+    #[test]
+    fn search_eval_smoke() {
+        let policy = empty_policy();
+        let cfg = HandConfig {
+            num_players: 2,
+            ..HandConfig::default()
+        };
+        let params = crate::bot::SearchParams {
+            time_ms: 20,
+            max_iters: 200,
+            ..crate::bot::SearchParams::default()
+        };
+        let r = run_eval_search(&policy, &cfg, Baseline::Caller, 24, params, 3);
+        assert_eq!(r.hands, 24);
+        assert!(r.mbb_per_hand.is_finite() && r.ci95.is_finite());
     }
 
     /// A calling-station policy against calling-station baselines is a
