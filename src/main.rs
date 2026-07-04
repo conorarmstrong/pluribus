@@ -234,6 +234,7 @@ enum Cmd {
     },
     /// Train the belief-state value network on solved turn spots.
     TrainValueNet {
+        /// Training data file(s); comma-separated files are concatenated.
         #[arg(long, default_value = "turn_data.bin")]
         data: String,
         #[arg(long, default_value = "value_net.bin")]
@@ -685,8 +686,15 @@ fn main() {
             batch,
             seed,
         } => {
-            let samples = valuenet::load_samples(&data)
-                .unwrap_or_else(|e| die(&format!("cannot load {data}: {e}")));
+            // Comma-separated data files are concatenated (e.g. combining
+            // generation batches).
+            let mut samples = Vec::new();
+            for path in data.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let mut s = valuenet::load_samples(path)
+                    .unwrap_or_else(|e| die(&format!("cannot load {path}: {e}")));
+                println!("loaded {} samples from {path}", s.len());
+                samples.append(&mut s);
+            }
             let hidden: Vec<usize> = hidden
                 .split(',')
                 .map(|s| s.trim().parse().unwrap_or_else(|_| die("bad --hidden")))
