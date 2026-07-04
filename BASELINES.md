@@ -248,7 +248,29 @@ measured. Artifact hashes:
   (178,501,229 B): `train --iters 100000000 --players 2 --stack 20000
   --out bp_hu200.bin` — 4.1h, 4,530,427 infosets, 4,203,000 strategies
 - Live protocol smoke test: 20 hands, 0 desyncs, ~1.5s/hand
-- Calibration (2,000 hands, `--search --search-ms 800`, seed 2): running
 - Caveats: internal probes (br/lbr/eval) have no --stack flag yet, so
   this blueprint has no internal exploitability number; no 200bb value
   net exists (flop-net search inactive).
+
+### First Slumbot results (2,000 hands each, sequential API sessions)
+
+| Config | mbb/hand | Command seed |
+|--------|----------|--------------|
+| search 800ms, unsafe | −1649.1 ±1130.5 | 2 |
+| search 800ms, --safe-resolve | −1207.2 ±983.4 | 4 |
+| **blueprint only** | **−782.0 ±809.4** | 3 |
+
+Readings (CIs overlap; ordering consistent across configs):
+1. Search HURTS vs a non-blueprint opponent — the tracker models
+   Slumbot as playing our blueprint, and resolves best-respond to
+   fictional ranges. Internal paired evals never see this (self-play
+   opponents ARE the blueprint). Phase 3's population belief net is the
+   structural fix.
+2. The gadget recovers part of the damage but not all — note its
+   safety values are rollout-estimated FROM the tracker, so wrong
+   beliefs contaminate the alternatives too.
+3. Blueprint-only ≈ always-fold level: the 100M 200bb core is
+   undertrained. bp_hu200_300m.bin (300M iters, ~12h) training.
+4. Live play found a real crash (fixed, `0744d3c`): off-tree drift can
+   leave shadow all-in while real can raise; apply_abs now degrades.
+   0 desyncs across all 6,000+ live hands.
