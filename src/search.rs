@@ -231,7 +231,7 @@ mod tests {
             .position(|a| matches!(a, AbsAction::Bet(_)))
             .unwrap();
 
-        let mut strategies = HashMap::new();
+        let mut strategies = crate::cfr::StrategyMap::default();
         for bucket in 0..169u16 {
             let mut s = vec![0.0f32; n_acts];
             if bucket == aa {

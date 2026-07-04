@@ -6,6 +6,7 @@ description = "Pluribus-style 6-max no-limit hold'em bot: Linear MCCFR blueprint
 
 [dependencies]
 rand = { version = "0.9", features = ["small_rng"] }
+mimalloc = "0.1"
 rayon = "1.10"
 dashmap = "6"
 ahash = "0.8"

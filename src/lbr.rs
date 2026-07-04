@@ -344,7 +344,7 @@ mod tests {
     fn empty_policy() -> Policy {
         Policy::new(
             Blueprint {
-                strategies: HashMap::new(),
+                strategies: Default::default(),
                 iterations: 0,
                 num_players: 2,
                 abs_cfg: AbsConfig::default(),
@@ -430,7 +430,7 @@ mod tests {
             .iter()
             .position(|a| matches!(a, AbsAction::Bet(_)))
             .unwrap();
-        let mut strategies = HashMap::new();
+        let mut strategies = crate::cfr::StrategyMap::default();
         for bucket in 0..169u16 {
             let mut s = vec![0.0f32; acts.len()];
             if bucket == aa {

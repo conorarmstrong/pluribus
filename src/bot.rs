@@ -514,7 +514,7 @@ mod tests {
         let bucket = crate::abstraction::preflop_bucket(h.hole(3));
 
         // Blueprint that always folds at this exact infoset.
-        let mut strategies = HashMap::new();
+        let mut strategies = crate::cfr::StrategyMap::default();
         let mut probs = vec![0.0f32; acts.len()];
         probs[0] = 1.0; // Fold is always first when facing a bet
         strategies.insert(make_key(bucket, &[]).to_vec(), probs);
@@ -538,7 +538,7 @@ mod tests {
         let abs = abs_small();
         let h = Hand::new(&HandConfig::default(), 0, fresh_deck());
         let bp = Blueprint {
-            strategies: HashMap::new(),
+            strategies: Default::default(),
             iterations: 0,
             num_players: 6,
             abs_cfg: AbsConfig::default(),
@@ -678,7 +678,7 @@ mod tests {
         let abs = Arc::new(abs_small());
         let policy = Policy::new(
             Blueprint {
-                strategies: HashMap::new(),
+                strategies: Default::default(),
                 iterations: 0,
                 num_players: 2,
                 abs_cfg: AbsConfig::default(),
@@ -760,7 +760,7 @@ mod tests {
         let abs = Arc::new(abs_small());
         let policy = Policy::new(
             Blueprint {
-                strategies: HashMap::new(),
+                strategies: Default::default(),
                 iterations: 0,
                 num_players: 2,
                 abs_cfg: AbsConfig::default(),
@@ -841,7 +841,7 @@ mod tests {
         let abs = Arc::new(abs_small());
         let policy = Policy::new(
             Blueprint {
-                strategies: HashMap::new(),
+                strategies: Default::default(),
                 iterations: 0,
                 num_players: 2,
                 abs_cfg: AbsConfig::default(),
@@ -955,7 +955,7 @@ mod tests {
         let abs = Arc::new(abs_small());
         let policy = Policy::new(
             Blueprint {
-                strategies: HashMap::new(),
+                strategies: Default::default(),
                 iterations: 0,
                 num_players: 2,
                 abs_cfg: AbsConfig::default(),

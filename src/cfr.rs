@@ -498,7 +498,8 @@ impl Trainer {
 
     /// Export the (much smaller) normalized average strategy for play.
     pub fn to_blueprint(&self) -> Blueprint {
-        let mut strategies = HashMap::with_capacity(self.nodes.len());
+        let mut strategies =
+            StrategyMap::with_capacity_and_hasher(self.nodes.len(), Default::default());
         for e in self.nodes.iter() {
             if let Some(s) = normalize(&e.value().strat) {
                 strategies.insert(e.key().to_vec(), s.iter().map(|&x| x as f32).collect());
@@ -607,12 +608,17 @@ pub fn sample_index(probs: &[f64], rng: &mut SmallRng) -> usize {
     probs.len() - 1
 }
 
+/// Strategy store keyed by (bucket, history) bytes. ahash: `get` runs on
+/// every decision of every hand everywhere, and the wire format (len +
+/// entries) is hasher-independent, so existing .bin files stay compatible.
+pub type StrategyMap = HashMap<Vec<u8>, Vec<f32>, ahash::RandomState>;
+
 /// The trained average strategy used at the table, together with the card
 /// abstraction it was trained under (config + k-means centroids), so play
 /// and benchmarking bucket cards exactly as training did.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Blueprint {
-    pub strategies: HashMap<Vec<u8>, Vec<f32>>,
+    pub strategies: StrategyMap,
     pub iterations: u64,
     pub num_players: usize,
     pub abs_cfg: AbsConfig,

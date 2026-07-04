@@ -21,6 +21,11 @@ mod table;
 mod turn;
 mod valuenet;
 
+// Solver walks allocate range-vector scratch at every node visit; mimalloc
+// is measurably faster than the system allocator on that churn.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use abstraction::{AbsConfig, Abstraction, Centroids};
 use bot::{Policy, SearchParams};
 use cfr::{Blueprint, TrainConfig, Trainer};

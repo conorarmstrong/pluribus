@@ -386,7 +386,7 @@ finishing_stacks = [10325, 9900, 10000, 10000, 9775, 10000]
     fn empty_policy() -> Policy {
         Policy::new(
             Blueprint {
-                strategies: HashMap::new(),
+                strategies: Default::default(),
                 iterations: 0,
                 num_players: 6,
                 abs_cfg: AbsConfig::default(),
@@ -452,7 +452,7 @@ finishing_stacks = [10325, 9900, 10000, 10000, 9775, 10000]
 
         let hole = [parse_card("3s").unwrap(), parse_card("5c").unwrap()];
         let bucket = crate::abstraction::preflop_bucket(hole);
-        let mut strategies = HashMap::new();
+        let mut strategies = crate::cfr::StrategyMap::default();
         let mut s = vec![0.0f32; n_acts];
         s[0] = 1.0; // always fold
         strategies.insert(

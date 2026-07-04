@@ -514,7 +514,7 @@ mod tests {
     fn empty_policy() -> Policy {
         Policy::new(
             Blueprint {
-                strategies: HashMap::new(),
+                strategies: Default::default(),
                 iterations: 0,
                 num_players: 2,
                 abs_cfg: AbsConfig::default(),

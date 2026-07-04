@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn merge_blends_inserts_and_skips_mismatches() {
-        let mut strategies = HashMap::new();
+        let mut strategies = crate::cfr::StrategyMap::default();
         // Existing key, matching length, unnormalized on purpose.
         strategies.insert(vec![1u8], vec![3.0f32, 1.0]); // normalizes to .75/.25
         // Existing key whose stored menu length differs from the record.
