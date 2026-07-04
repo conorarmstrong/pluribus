@@ -31,15 +31,29 @@ impl Table {
         }
     }
 
+    /// Concrete action for `a` on `h`, degrading a raise to check/call when
+    /// `h` has no legal raise. The two hands can disagree about raise
+    /// legality after off-tree drift (e.g. the shadow is already all-in
+    /// while the real hand can still raise); the caller chose `a` from ONE
+    /// hand's menu, so the other must degrade gracefully rather than panic.
+    fn concrete_or_call(h: &Hand, a: AbsAction, abs: &Abstraction) -> PlayerAction {
+        match a {
+            AbsAction::Bet(_) | AbsAction::AllIn if h.raise_bounds().is_none() => {
+                PlayerAction::CheckCall
+            }
+            _ => abs.concrete(h, a),
+        }
+    }
+
     /// Apply a bot-chosen abstract action to both hands. Returns the concrete
     /// action applied to the real hand (used by AIVAT replay).
     pub fn apply_abs(&mut self, a: AbsAction, abs: &Abstraction) -> PlayerAction {
         let street_before = self.shadow.street();
-        let shadow_act = abs.concrete(&self.shadow, a);
+        let shadow_act = Self::concrete_or_call(&self.shadow, a, abs);
         self.shadow.apply(shadow_act);
         // Concrete amount computed from the real pot, so real bets stay
         // sensible even if the shadow has drifted.
-        let real_act = abs.concrete(&self.real, a);
+        let real_act = Self::concrete_or_call(&self.real, a, abs);
         self.real.apply(real_act);
         self.push_token(a, self.shadow.street() != street_before);
         self.resync_if_diverged();
@@ -583,6 +597,43 @@ mod tests {
         let r = run_eval_search(&policy, &cfg, Baseline::Caller, 24, params, 3);
         assert_eq!(r.hands, 24);
         assert!(r.mbb_per_hand.is_finite() && r.ci95.is_finite());
+    }
+
+    /// After off-tree drift leaves the shadow all-in while the real hand
+    /// can still raise, applying an aggressive abstract action must not
+    /// panic: the shadow degrades to check/call, the real hand raises.
+    #[test]
+    fn apply_abs_degrades_gracefully_when_shadow_cannot_raise() {
+        let abs = Abstraction::new(crate::abstraction::AbsConfig {
+            postflop_buckets: 6,
+            equity_rollouts: 30,
+            dist_runouts: 6,
+            runout_rollouts: 15,
+            cache_cap: 100_000,
+        });
+        let cfg = HandConfig {
+            num_players: 2,
+            stack: 20_000,
+            sb: 50,
+            bb: 100,
+        };
+        let mut t = Table::new(&cfg, 0, crate::cards::fresh_deck());
+        // Drive the SHADOW all-in directly (simulating accumulated
+        // off-tree mapping drift) while the real hand stays shallow.
+        let (_, hi) = t.shadow.raise_bounds().unwrap();
+        t.shadow.apply(PlayerAction::RaiseTo(hi)); // shadow: p0 shoves
+        assert!(t.shadow.raise_bounds().is_none() || t.shadow.to_act() == 1);
+        // Real hand: p0 has merely limped.
+        t.real.apply(PlayerAction::CheckCall);
+        assert_eq!(t.real.to_act(), 1);
+        assert_eq!(t.shadow.to_act(), 1);
+
+        // p1 goes all-in: legal on the real hand; the shadow (facing a
+        // 20,000 shove) can only call — must not panic.
+        let real_act = t.apply_abs(AbsAction::AllIn, &abs);
+        assert!(matches!(real_act, PlayerAction::RaiseTo(_)));
+        // Both hands advanced; resync keeps them structurally aligned.
+        assert_eq!(t.shadow.is_terminal(), t.real.is_terminal());
     }
 
     /// A calling-station policy against calling-station baselines is a
