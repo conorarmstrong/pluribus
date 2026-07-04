@@ -209,4 +209,34 @@ net is the measured +313 search edge). turn_data2.bin (30k spots,
 seed 2) generation launched.
 
 Experiment artifacts bp_gen1{,b,c,d}.bin (4 × 4.3GB) are candidates for
-deletion — none passed gates; diagnosis recorded here.
+deletion — none passed gates; diagnosis recorded here. (Deleted 3 Jul
+with user approval.)
+
+## 2026-07-04 — Phase 2 value branch: better nets don't help at the
+## table — flywheel closed
+
+30k new exactly-solved turn spots (turn_data2.bin, seed 2, 8.4h)
+combined with the original 20k; two nets trained on the 50k total:
+
+| Net | Val loss | Net-gain, same 40k paired deals (seed 7, 800ms) |
+|-----|----------|--------------------------------------------------|
+| value_net.bin (20k, 512×512) | 0.00089 | +171.1 ±100.3 mbb/hand |
+| value_net50k_512.bin | 0.00066 | not run (dominated by 1024 on loss) |
+| value_net50k_1024.bin | 0.00062 | **+174.1 ±99.7** |
+
+Verdict: a 30% val-loss improvement translates to +3 mbb at the table —
+nothing. Leaf-value accuracy is no longer the binding constraint at
+800ms budgets. (Both net-gain arms now include exact turn solving,
+which also explains the lower absolute net-gain vs the historical
++313 ±198: the no-net baseline got stronger in Phase 1b.)
+
+Phase 2 conclusion: policy distillation null, value scaling null — the
+search stack's remaining strength levers are solver menus (slim
+TURN/FLOP menus restrict the hero), iteration budgets, leaf-query
+sampling (16 of 49 turns), and belief quality (Phase 3's target).
+value_net50k_512.bin equals the old net's speed with better loss —
+harmless default swap if desired; 1024 costs 2× per query for nothing
+measured. Artifact hashes:
+- turn_data2.bin `bed4dcc33f88d7fe602275fabc3aff69939369ba45b6d9144519be38fd6ad8ab` (638,160,008 B)
+- value_net50k_512.bin `a6655a55baafaf1c353cc0d1db1f5fbfc2335876f7e4ebd57b62c12761b2e158` (12,038,616 B)
+- value_net50k_1024.bin `2cfa690afe61f6692355f37e75d4b19b1558c07bee92f7b4f8822397e5f641e6` (26,163,672 B)

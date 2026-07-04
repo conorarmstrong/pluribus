@@ -51,6 +51,11 @@ enum Cmd {
         out: String,
         #[arg(long, default_value_t = 6)]
         players: usize,
+        /// Starting stack in chips (blinds are 50/100, so 10,000 = 100bb
+        /// — the Pluribus setup — and 20,000 = 200bb — the Slumbot / GTO
+        /// Wizard benchmark setup).
+        #[arg(long, default_value_t = 10_000)]
+        stack: u32,
         /// Resume from a training checkpoint.
         #[arg(long)]
         resume: Option<String>,
@@ -317,6 +322,7 @@ fn main() {
             iters,
             out,
             players,
+            stack,
             resume,
             checkpoint,
             buckets,
@@ -346,6 +352,7 @@ fn main() {
             let train_cfg = TrainConfig {
                 hand: HandConfig {
                     num_players: players,
+                    stack,
                     ..HandConfig::default()
                 },
                 prune_after: if no_prune { u64::MAX } else { 200_000 },
