@@ -16,6 +16,7 @@ mod play;
 mod portfolio;
 mod river;
 mod search;
+mod slumbot;
 mod table;
 mod turn;
 mod valuenet;
@@ -299,6 +300,37 @@ enum Cmd {
         hands: u64,
         #[arg(long, default_value_t = 1)]
         seed: u64,
+    },
+    /// Play against Slumbot over its public API (heads-up NLHE, 200bb,
+    /// 50/100) and report our winrate. Train the blueprint with
+    /// `train --players 2 --stack 20000`.
+    Slumbot {
+        #[arg(long, default_value = "bp_hu200.bin")]
+        blueprint: String,
+        #[arg(long, default_value_t = 1_000)]
+        hands: u64,
+        /// Enable online subgame resolving (recommended).
+        #[arg(long)]
+        search: bool,
+        #[arg(long, default_value_t = 800)]
+        search_ms: u64,
+        /// Safe (gadget) resolving.
+        #[arg(long)]
+        safe_resolve: bool,
+        /// Belief-state value net for flop solving (must be trained on
+        /// 200bb HU spots to help).
+        #[arg(long)]
+        value_net: Option<String>,
+        /// Registered slumbot.com account (optional; anonymous otherwise).
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Log per-hand protocol problems.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Print blueprint statistics.
     Inspect {
@@ -815,6 +847,65 @@ fn main() {
             println!(
                 "focal winrate: {:+.1} mbb/hand (95% CI ±{:.1}) over {} hands",
                 r.mbb_per_hand, r.ci95, r.hands
+            );
+        }
+
+        Cmd::Slumbot {
+            blueprint,
+            hands,
+            search,
+            search_ms,
+            safe_resolve,
+            value_net,
+            username,
+            password,
+            seed,
+            verbose,
+        } => {
+            let net = value_net.map(|p| {
+                let n = valuenet::ValueNet::load(&p)
+                    .unwrap_or_else(|e| die(&format!("cannot load value net '{p}': {e}")));
+                println!("loaded value net from {p}");
+                Arc::new(n)
+            });
+            let policy = load_policy(&blueprint).with_value_net(net);
+            if policy.blueprint.num_players != 2 {
+                die("Slumbot is heads-up: train with --players 2 --stack 20000");
+            }
+            let mut transport = slumbot::HttpTransport;
+            let token = match (username, password) {
+                (Some(u), Some(p)) => Some(
+                    transport
+                        .login(&u, &p)
+                        .unwrap_or_else(|e| die(&format!("login failed: {e}"))),
+                ),
+                _ => None,
+            };
+            let cfg = slumbot::SlumbotCfg {
+                hands,
+                search: search.then_some(SearchParams {
+                    time_ms: search_ms,
+                    safe_resolve,
+                    ..SearchParams::default()
+                }),
+                seed,
+                token,
+                verbose,
+            };
+            println!("playing {hands} hands vs Slumbot (search: {search})...");
+            let started = std::time::Instant::now();
+            let r = slumbot::run(&policy, &mut transport, &cfg, &mut |h, mean| {
+                println!("  {h} hands, running mean {mean:+.0} mbb/hand");
+            })
+            .unwrap_or_else(|e| die(&format!("slumbot session failed: {e}")));
+            println!(
+                "vs Slumbot: {:+.1} mbb/hand (95% CI ±{:.1}) over {} hands \
+                 ({} desyncs) in {:.0}s",
+                r.mbb_per_hand,
+                r.ci95,
+                r.hands,
+                r.desyncs,
+                started.elapsed().as_secs_f64()
             );
         }
 
