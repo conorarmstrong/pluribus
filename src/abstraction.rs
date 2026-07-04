@@ -483,19 +483,45 @@ impl Abstraction {
     /// board, build (once) the exact-equity bucket of EVERY hole combo on
     /// it with the O(N) showdown sweep, then look up the hole through the
     /// same suit permutation.
+    ///
+    /// Hot path: a traversal queries the same river board thousands of
+    /// times, so a thread-local one-slot memo skips both the 24-permutation
+    /// canonicalization and the shared-map lookup on repeats, and the
+    /// shared map is read-locked (get) before ever write-locking (entry).
     fn river_bucket(&self, hole: [Card; 2], board: &[Card]) -> u16 {
         debug_assert_eq!(board.len(), 5);
-        let (bkey, perm) = canonical_board(board);
-        let table = self
-            .river_boards
-            .entry(bkey)
-            .or_insert_with(|| {
-                std::sync::Arc::new(build_river_table(
-                    &apply_perm(board, &perm),
-                    self.cfg.postflop_buckets,
-                ))
-            })
-            .clone();
+        thread_local! {
+            static LAST: std::cell::RefCell<Option<([Card; 5], [u8; 4], std::sync::Arc<Vec<u16>>)>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        let b5 = [board[0], board[1], board[2], board[3], board[4]];
+        let memo = LAST.with(|l| {
+            l.borrow()
+                .as_ref()
+                .filter(|(b, _, _)| *b == b5)
+                .map(|(_, p, t)| (*p, t.clone()))
+        });
+        let (perm, table) = match memo {
+            Some(hit) => hit,
+            None => {
+                let (bkey, perm) = canonical_board(board);
+                let table = match self.river_boards.get(&bkey) {
+                    Some(t) => t.clone(),
+                    None => self
+                        .river_boards
+                        .entry(bkey)
+                        .or_insert_with(|| {
+                            std::sync::Arc::new(build_river_table(
+                                &apply_perm(board, &perm),
+                                self.cfg.postflop_buckets,
+                            ))
+                        })
+                        .clone(),
+                };
+                LAST.with(|l| *l.borrow_mut() = Some((b5, perm, table.clone())));
+                (perm, table)
+            }
+        };
         let map = |c: Card| (c & !3) | perm[(c & 3) as usize];
         table[crate::search::combo_index(map(hole[0]), map(hole[1]))]
     }
