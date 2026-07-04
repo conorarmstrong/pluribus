@@ -240,3 +240,15 @@ measured. Artifact hashes:
 - turn_data2.bin `bed4dcc33f88d7fe602275fabc3aff69939369ba45b6d9144519be38fd6ad8ab` (638,160,008 B)
 - value_net50k_512.bin `a6655a55baafaf1c353cc0d1db1f5fbfc2335876f7e4ebd57b62c12761b2e158` (12,038,616 B)
 - value_net50k_1024.bin `2cfa690afe61f6692355f37e75d4b19b1558c07bee92f7b4f8822397e5f641e6` (26,163,672 B)
+
+## 2026-07-04 — HU 200bb blueprint + Slumbot adapter (external benchmark)
+
+- Code: commit `134b43f` (Slumbot adapter), `--stack` train flag
+- bp_hu200.bin `5f4ac04c2ca7af9ff0427fe2731bd130b28a037ec845f22ace79f7a335a47568`
+  (178,501,229 B): `train --iters 100000000 --players 2 --stack 20000
+  --out bp_hu200.bin` — 4.1h, 4,530,427 infosets, 4,203,000 strategies
+- Live protocol smoke test: 20 hands, 0 desyncs, ~1.5s/hand
+- Calibration (2,000 hands, `--search --search-ms 800`, seed 2): running
+- Caveats: internal probes (br/lbr/eval) have no --stack flag yet, so
+  this blueprint has no internal exploitability number; no 200bb value
+  net exists (flop-net search inactive).
