@@ -196,28 +196,38 @@ impl Trainer {
     pub fn run(&self, iterations: u64, progress: &(dyn Fn(u64) + Sync)) {
         let start = self.iters_done.load(Ordering::Relaxed);
         let n = self.cfg.hand.num_players;
-        (0..iterations).into_par_iter().for_each(|i| {
-            let t = start + i + 1;
-            let mut rng =
-                SmallRng::seed_from_u64(t.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.cfg.seed);
-            let traverser = (t % n as u64) as usize;
-            let mut deck = fresh_deck();
-            deck.shuffle(&mut rng);
-            let hand = Hand::new(&self.cfg.hand, 0, deck);
-            if hand.is_terminal() {
-                return; // degenerate deal (e.g. blinds all-in with tiny stacks)
-            }
-            let weight = t as f64;
-            let prune_ok = t > self.cfg.prune_after;
-            let model_opp = self
-                .rnr
-                .as_ref()
-                .is_some_and(|r| rng.random::<f64>() < r.p);
-            let mut hist = Vec::with_capacity(32);
-            self.traverse(&hand, &mut hist, traverser, weight, prune_ok, model_opp, &mut rng);
-            let done = self.iters_done.fetch_add(1, Ordering::Relaxed) + 1;
-            if done.is_multiple_of(4096) {
-                progress(done - start);
+        // Traversals are batched per rayon task: hundreds of millions of
+        // one-traversal tasks pay measurable scheduler overhead. Each
+        // traversal keeps its own t-derived rng, so results are identical
+        // to unbatched scheduling.
+        const BATCH: u64 = 256;
+        let chunks = iterations.div_ceil(BATCH);
+        (0..chunks).into_par_iter().for_each(|c| {
+            let lo = c * BATCH;
+            let hi = ((c + 1) * BATCH).min(iterations);
+            for i in lo..hi {
+                let t = start + i + 1;
+                let mut rng =
+                    SmallRng::seed_from_u64(t.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.cfg.seed);
+                let traverser = (t % n as u64) as usize;
+                let mut deck = fresh_deck();
+                deck.shuffle(&mut rng);
+                let hand = Hand::new(&self.cfg.hand, 0, deck);
+                if hand.is_terminal() {
+                    continue; // degenerate deal (e.g. blinds all-in, tiny stacks)
+                }
+                let weight = t as f64;
+                let prune_ok = t > self.cfg.prune_after;
+                let model_opp = self
+                    .rnr
+                    .as_ref()
+                    .is_some_and(|r| rng.random::<f64>() < r.p);
+                let mut hist = Vec::with_capacity(32);
+                self.traverse(&hand, &mut hist, traverser, weight, prune_ok, model_opp, &mut rng);
+                let done = self.iters_done.fetch_add(1, Ordering::Relaxed) + 1;
+                if done.is_multiple_of(4096) {
+                    progress(done - start);
+                }
             }
         });
         // Make the final count exact even for the skipped terminal deals.

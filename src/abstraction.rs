@@ -296,6 +296,12 @@ pub struct Abstraction {
     /// expensive Monte Carlo work runs once per isomorphism class (up to
     /// 24 suit relabelings share one entry).
     canon: DashMap<u64, u16, ahash::RandomState>,
+    /// Exact river buckets, one table per suit-canonical BOARD covering
+    /// every hole combo at once (O(N) sweep, ~1326 evals per board). The
+    /// canonical river-board space is ~134k entries, so this converges to
+    /// pure lookups; per-pair Monte Carlo river equity cost 200 rollouts
+    /// per miss and dominated blueprint training (83% of samples).
+    river_boards: DashMap<u64, std::sync::Arc<Vec<u16>>, ahash::RandomState>,
     /// Previous-round context, required when `centroids.is_strategic()`.
     strat: Option<StratCtx>,
 }
@@ -313,6 +319,7 @@ impl Abstraction {
             centroids,
             cache: DashMap::with_hasher(ahash::RandomState::new()),
             canon: DashMap::with_hasher(ahash::RandomState::new()),
+            river_boards: DashMap::with_hasher(ahash::RandomState::new()),
             strat: None,
         }
     }
@@ -411,6 +418,9 @@ impl Abstraction {
         if board.is_empty() {
             return preflop_bucket(hole);
         }
+        if board.len() == 5 && self.strat.is_none() {
+            return self.river_bucket(hole, board);
+        }
         let key = pack_cards_key(hole, board);
         if let Some(b) = self.cache.get(&key) {
             return *b;
@@ -469,9 +479,35 @@ impl Abstraction {
         b
     }
 
+    /// Exact river bucket via a per-board table: suit-canonicalize the
+    /// board, build (once) the exact-equity bucket of EVERY hole combo on
+    /// it with the O(N) showdown sweep, then look up the hole through the
+    /// same suit permutation.
+    fn river_bucket(&self, hole: [Card; 2], board: &[Card]) -> u16 {
+        debug_assert_eq!(board.len(), 5);
+        let (bkey, perm) = canonical_board(board);
+        let table = self
+            .river_boards
+            .entry(bkey)
+            .or_insert_with(|| {
+                std::sync::Arc::new(build_river_table(
+                    &apply_perm(board, &perm),
+                    self.cfg.postflop_buckets,
+                ))
+            })
+            .clone();
+        let map = |c: Card| (c & !3) | perm[(c & 3) as usize];
+        table[crate::search::combo_index(map(hole[0]), map(hole[1]))]
+    }
+
     #[allow(dead_code)]
     pub fn cache_len(&self) -> usize {
         self.cache.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn river_tables_len(&self) -> usize {
+        self.river_boards.len()
     }
 
     #[allow(dead_code)]
@@ -544,6 +580,85 @@ fn pack_cards_key(hole: [Card; 2], board: &[Card]) -> u64 {
         key = (key << 6) | c as u64;
     }
     key
+}
+
+/// Suit-canonical form of a 5-card board: the permutation of suits (from
+/// the 24) minimizing the packed sorted-board key, and that key.
+fn canonical_board(board: &[Card]) -> (u64, [u8; 4]) {
+    let mut best_key = u64::MAX;
+    let mut best_perm = SUIT_PERMS[0];
+    for perm in &SUIT_PERMS {
+        let mut b = [0u8; 5];
+        for (dst, &src) in b.iter_mut().zip(board) {
+            *dst = (src & !3) | perm[(src & 3) as usize];
+        }
+        b.sort_unstable();
+        let mut key = 0u64;
+        for &c in &b {
+            key = (key << 6) | c as u64;
+        }
+        if key < best_key {
+            best_key = key;
+            best_perm = *perm;
+        }
+    }
+    (best_key, best_perm)
+}
+
+fn apply_perm(board: &[Card], perm: &[u8; 4]) -> Vec<Card> {
+    board.iter().map(|&c| (c & !3) | perm[(c & 3) as usize]).collect()
+}
+
+/// Exact river-equity bucket for every hole combo on `board` in one O(N)
+/// sweep: rank all combos, then equity = win + tie/2 fraction of the
+/// card-removal-compatible opponent combos (uniform opponent — the same
+/// estimand as `equity_vs_random`, exactly).
+fn build_river_table(board: &[Card], nb: u16) -> Vec<u16> {
+    use crate::eval::eval_hole_board;
+    use crate::search::NUM_COMBOS;
+    let combos = crate::search::all_combos();
+    let board5 = [board[0], board[1], board[2], board[3], board[4]];
+    let mut on_board = [false; 52];
+    for &c in board {
+        on_board[c as usize] = true;
+    }
+    let rank: Vec<u32> = combos
+        .iter()
+        .map(|c| {
+            if on_board[c[0] as usize] || on_board[c[1] as usize] {
+                0
+            } else {
+                eval_hole_board(c, &board5)
+            }
+        })
+        .collect();
+    let mut sorted: Vec<u32> = (0..NUM_COMBOS as u32)
+        .filter(|&ci| rank[ci as usize] > 0)
+        .collect();
+    sorted.sort_unstable_by_key(|&ci| rank[ci as usize]);
+
+    let mut reach = vec![0.0f64; NUM_COMBOS];
+    let mut total = 0.0f64;
+    let mut card = [0.0f64; 52];
+    for &ci in &sorted {
+        let c = combos[ci as usize];
+        reach[ci as usize] = 1.0;
+        total += 1.0;
+        card[c[0] as usize] += 1.0;
+        card[c[1] as usize] += 1.0;
+    }
+    // matched = 1, dead = 0: sweep value = (weaker − stronger) mass, so
+    // equity = (weaker + tie/2) / compat = 0.5 + value / (2·compat).
+    let v = crate::river::showdown_sweep(&combos, &sorted, &rank, &reach, total, &card, 1.0, 0.0);
+    let mut out = vec![0u16; NUM_COMBOS];
+    for &ci in &sorted {
+        let ci = ci as usize;
+        let c = combos[ci];
+        let compat = total - card[c[0] as usize] - card[c[1] as usize] + 1.0;
+        let eq = 0.5 + v[ci] / (2.0 * compat);
+        out[ci] = ((eq * nb as f64) as u16).min(nb - 1);
+    }
+    out
 }
 
 /// Monte Carlo equity of hole+board vs one uniform random opponent hand,
@@ -912,10 +1027,12 @@ mod tests {
         let ba = a.bucket([air[0], air[1]], &board, &mut rng);
         assert_eq!(bn, a.cfg.postflop_buckets - 1, "nuts must be top bucket");
         assert!(bn > ba);
-        // Cache: same query hits the memo and returns the same bucket.
+        // Memoized: the same query (either card order) returns the same
+        // bucket. River queries live in the per-board table, not the
+        // pair cache.
         let bn2 = a.bucket([nuts[1], nuts[0]], &board, &mut rng);
         assert_eq!(bn, bn2);
-        assert!(a.cache_len() >= 1);
+        assert!(a.river_tables_len() >= 1);
     }
 
     #[test]
@@ -1036,6 +1153,83 @@ mod tests {
 
     /// With trained centroids, hands with clearly different distributions land
     /// in different buckets, and bucketing is stable via the cache.
+    #[test]
+    /// The exact river table must reproduce naive per-hole exact equity
+    /// (direct loop over all compatible opponent combos) bucket-for-bucket.
+    #[test]
+    fn river_table_matches_naive_exact_equity() {
+        use crate::eval::eval_hole_board;
+        let abs = Abstraction::new(AbsConfig {
+            postflop_buckets: 12,
+            ..AbsConfig::default()
+        });
+        let board = parse_cards("Qs 7h 2d 9c Kd").unwrap();
+        let board5 = [board[0], board[1], board[2], board[3], board[4]];
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
+        for hole_s in ["As Ad", "Kh Qc", "7c 7s", "6h 5h", "3c 2c", "Ah 4s"] {
+            let h = parse_cards(hole_s).unwrap();
+            let hole = [h[0], h[1]];
+            let hero = eval_hole_board(&hole, &board5);
+            let mut used = [false; 52];
+            for &c in board.iter().chain(hole.iter()) {
+                used[c as usize] = true;
+            }
+            let (mut num, mut den) = (0.0f64, 0.0f64);
+            for a in 0..52u8 {
+                for b in (a + 1)..52 {
+                    if used[a as usize] || used[b as usize] {
+                        continue;
+                    }
+                    let v = eval_hole_board(&[a, b], &board5);
+                    num += if hero > v {
+                        1.0
+                    } else if hero == v {
+                        0.5
+                    } else {
+                        0.0
+                    };
+                    den += 1.0;
+                }
+            }
+            let expect = (((num / den) * 12.0) as u16).min(11);
+            let got = abs.bucket(hole, &board, &mut rng);
+            assert_eq!(got, expect, "bucket mismatch for {hole_s}");
+        }
+    }
+
+    /// Suit-isomorphic (hole, board) pairs must land in the same river
+    /// bucket through the per-board canonical table.
+    #[test]
+    fn river_buckets_are_suit_isomorphic() {
+        let abs = Abstraction::new(AbsConfig {
+            postflop_buckets: 12,
+            ..AbsConfig::default()
+        });
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(2);
+        let board = parse_cards("Ah Kh 7h 4d 2c").unwrap();
+        let hole = parse_cards("Qh Jh").unwrap();
+        let b0 = abs.bucket([hole[0], hole[1]], &board, &mut rng);
+        // Swap hearts and spades, and clubs and diamonds, everywhere.
+        let swap = |c: Card| {
+            let (r, s) = (c & !3, c & 3);
+            r | match s {
+                0 => 1,
+                1 => 0,
+                2 => 3,
+                _ => 2,
+            }
+        };
+        let board2: Vec<Card> = board.iter().map(|&c| swap(c)).collect();
+        let hole2 = [swap(hole[0]), swap(hole[1])];
+        let b1 = abs.bucket(hole2, &board2, &mut rng);
+        assert_eq!(b0, b1, "suit relabeling must not change the bucket");
+        // Sanity: a made flush is a top bucket, stone air is a low one.
+        assert_eq!(b0, 11, "nut flush must be in the top bucket");
+        let air = parse_cards("9c 3d").unwrap();
+        let ba = abs.bucket([air[0], air[1]], &board, &mut rng);
+        assert!(ba <= 4, "nine-high air must be in a low bucket, got {ba}");
+    }
+
     #[test]
     fn kmeans_buckets_separate_monster_from_air() {
         let cfg = AbsConfig {
