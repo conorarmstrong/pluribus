@@ -274,3 +274,28 @@ Readings (CIs overlap; ordering consistent across configs):
 4. Live play found a real crash (fixed, `0744d3c`): off-tree drift can
    leave shadow all-in while real can raise; apply_abs now degrades.
    0 desyncs across all 6,000+ live hands.
+
+## 2026-07-05 — Exact river bucketing (10× training) + 300M null
+
+Training profiling found 83% of CPU in per-(hole,board) MC river equity
+(200 rollouts/miss, hit rate collapsing — the 300M run tracked 2+
+days). Fix: one exact O(N) sweep per suit-canonical board (~134k
+total), all 1,326 combos at once, verified bucket-for-bucket vs naive;
+plus read-before-write locking and a thread-local board memo
+(commits `b5be9ec`..`27cc811`). Sustained training rate 6,762 →
+28,846 iters/s (cold-cache probe 69k); 300M = 2.9h.
+
+- bp_hu200_300m.bin
+  `1f285e9057c117b6a29870ea7577221e9189ec4831a361f345aa65d48c39c800`
+  (187,029,939 B): 300M iters, 200bb HU, exact river buckets, 4.57M
+  infosets.
+
+| Blueprint | vs Slumbot (2k hands, blueprint-only, seed 3) |
+|-----------|------------------------------------------------|
+| 100M, MC river buckets | −782.0 ±809.4 |
+| 300M, exact river buckets | **−719.0 ±867.3** |
+
+Verdict: NULL — 3× training + exact buckets moved nothing. Iteration
+count is not the binding constraint; the 12-bucket abstraction is.
+Next: bucket scaling (`--buckets 36`, running) — river granularity is
+now free (exact tables cost the same at any bucket count).
