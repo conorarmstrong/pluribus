@@ -40,11 +40,20 @@ pub fn all_combos() -> Vec<[Card; 2]> {
     v
 }
 
+/// Target likelihood for belief widening (distinct knob from OBS_FLOOR,
+/// which floors per-combo action probabilities).
+const WIDEN_TARGET: f64 = 0.02;
+
 pub struct RangeTracker {
     n: usize,
     combos: Vec<[Card; 2]>,
     /// weights[seat][combo]; unnormalized.
     weights: Vec<Vec<f64>>,
+    /// Belief widening for opponents NOT known to play the blueprint
+    /// (live/external play). Off by default: self-play harnesses
+    /// (valuenet, distill, eval) face literal blueprint opponents where
+    /// hard Bayes is exact.
+    widen: bool,
 }
 
 impl RangeTracker {
@@ -53,7 +62,14 @@ impl RangeTracker {
             n,
             combos: all_combos(),
             weights: vec![vec![1.0; NUM_COMBOS]; n],
+            widen: false,
         }
+    }
+
+    /// Enable belief widening (live play vs unknown opponents).
+    pub fn with_widening(mut self) -> Self {
+        self.widen = true;
+        self
     }
 
     /// Zero out combos containing any of `cards` (e.g. newly dealt board
@@ -140,10 +156,14 @@ impl RangeTracker {
         // sharpening instead of concentrating on a fiction. Measured live:
         // hard-Bayes beliefs made search lose ~2× faster vs Slumbot than
         // no search at all (see BASELINES.md, 4 Jul).
+        if !self.widen {
+            self.weights[seat] = updates;
+            return;
+        }
         let before: f64 = self.weights[seat].iter().sum();
         let after: f64 = updates.iter().sum();
         let like = if before > 0.0 { after / before } else { 1.0 };
-        let beta = (OBS_FLOOR / like.max(1e-9)).min(0.75);
+        let beta = (WIDEN_TARGET / like.max(1e-9)).min(0.75);
         let old = &self.weights[seat];
         self.weights[seat] = updates
             .iter()
@@ -247,7 +267,7 @@ mod tests {
             abs_cfg: AbsConfig::default(),
             centroids: None,
         };
-        let mut t = RangeTracker::new(6);
+        let mut t = RangeTracker::new(6).with_widening();
         let seat = 3;
         let taken = acts[raise_idx];
         t.observe(seat, taken, &h, &[], &bp, &abs);
@@ -324,12 +344,10 @@ mod tests {
         let junk = parse_cards("7c 2d").unwrap();
         let p_aa = t.prob(3, [aa_combo[0], aa_combo[1]]);
         let p_junk = t.prob(3, [junk[0], junk[1]]);
-        // Belief widening tempers the hard-Bayes 50× floor ratio (an
-        // off-model raise is also evidence the model is wrong — see
-        // off_model_actions_widen_instead_of_concentrating), but a raise
-        // must still clearly favor the raising hand.
+        // Widening is off by default (self-play trackers face literal
+        // blueprint opponents), so hard Bayes concentration holds here.
         assert!(
-            p_aa > 5.0 * p_junk,
+            p_aa > 40.0 * p_junk,
             "AA must dominate after a raise: p_aa={p_aa:.5} p_junk={p_junk:.5}"
         );
         // Unobserved seat stays uniform.

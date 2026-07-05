@@ -193,11 +193,15 @@ pub struct Autopsy {
 }
 
 impl Autopsy {
-    fn record(&mut self, action: &str, we_folded_last: bool, showdown: bool, mbb: f64) {
-        let st = action.bytes().filter(|&b| b == b'/').count().min(3);
-        let kind = if showdown {
+    fn record(&mut self, action: &str, we_sent_fold: bool, mbb: f64) {
+        // Trailing '/'s are dealt run-out streets after an all-in, not
+        // streets with betting: bin by where betting actually ended.
+        let betting = action.trim_end_matches('/');
+        let st = betting.bytes().filter(|&b| b == b'/').count().min(3);
+        let folded = betting.ends_with('f');
+        let kind = if !folded {
             2
-        } else if we_folded_last {
+        } else if we_sent_fold {
             0
         } else {
             1
@@ -289,7 +293,7 @@ impl HandState {
         }
         let button = if client_pos == 1 { 0 } else { 1 };
         let table = Table::new(&cfg, button, deck);
-        let mut tracker = RangeTracker::new(2);
+        let mut tracker = RangeTracker::new(2).with_widening();
         // The bot can't hold our cards.
         tracker.set_weight(1, [holes[0], holes[1]], 0.0);
         Ok(HandState {
@@ -395,14 +399,13 @@ pub fn run(
     let mut results: Vec<f64> = Vec::with_capacity(cfg.hands as usize);
     let mut desyncs = 0u64;
     let mut autopsy = Autopsy::default();
-    let mut we_sent_fold = false;
 
     'hands: for h in 0..cfg.hands {
         let mut r = transport.new_hand(token.as_deref())?;
         if let Some(t) = r.get("token").and_then(|t| t.as_str()) {
             token = Some(t.to_string());
         }
-        we_sent_fold = false;
+        let mut we_sent_fold = false;
         let mut st = match HandState::build(&r) {
             Ok(s) => s,
             Err(e) => {
@@ -420,8 +423,7 @@ pub fn run(
             if let Some(w) = r.get("winnings").and_then(|w| w.as_i64()) {
                 let mbb = w as f64 / 100.0 * 1000.0;
                 let action = r.get("action").and_then(|a| a.as_str()).unwrap_or("");
-                let folded = action.trim_end_matches('/').ends_with('f');
-                autopsy.record(action, folded && we_sent_fold, !folded, mbb);
+                autopsy.record(action, we_sent_fold, mbb);
                 results.push(mbb); // chips → mbb
                 if h % 50 == 49 {
                     let mean = results.iter().sum::<f64>() / results.len() as f64;
