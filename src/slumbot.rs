@@ -168,6 +168,9 @@ pub struct SlumbotCfg {
     pub seed: u64,
     pub token: Option<String>,
     pub verbose: bool,
+    /// Append each completed hand's final API response as one JSON line
+    /// (opponent-modeling data: action string, board, shown cards, winnings).
+    pub log: Option<String>,
 }
 
 #[derive(Debug)]
@@ -400,6 +403,16 @@ pub fn run(
     let mut results: Vec<f64> = Vec::with_capacity(cfg.hands as usize);
     let mut desyncs = 0u64;
     let mut autopsy = Autopsy::default();
+    let mut log = match &cfg.log {
+        Some(p) => Some(std::io::BufWriter::new(
+            std::fs::File::options()
+                .create(true)
+                .append(true)
+                .open(p)
+                .map_err(|e| format!("log {p}: {e}"))?,
+        )),
+        None => None,
+    };
 
     'hands: for h in 0..cfg.hands {
         // A dropped connection must not abort a long session: retry
@@ -442,6 +455,10 @@ pub fn run(
                 let mbb = w as f64 / 100.0 * 1000.0;
                 let action = r.get("action").and_then(|a| a.as_str()).unwrap_or("");
                 autopsy.record(action, we_sent_fold, mbb);
+                if let Some(f) = log.as_mut() {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{r}");
+                }
                 results.push(mbb); // chips → mbb
                 if h % 50 == 49 {
                     let mean = results.iter().sum::<f64>() / results.len() as f64;
@@ -515,6 +532,10 @@ pub fn run(
         }
     }
 
+    if let Some(f) = log.as_mut() {
+        use std::io::Write;
+        let _ = f.flush();
+    }
     let n = results.len().max(1) as f64;
     let mean = results.iter().sum::<f64>() / n;
     let var = results.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>()
@@ -693,6 +714,7 @@ mod tests {
             seed: 3,
             token: None,
             verbose: true,
+            log: None,
         };
         let r = run(&policy, &mut t, &cfg, &mut |_, _| {}).unwrap();
         assert_eq!(r.hands, 1);
@@ -740,6 +762,39 @@ mod tests {
         })
     }
 
+    /// With a log path, each completed hand's final API response (action
+    /// string, board, both hole-card fields when shown, winnings) must be
+    /// appended as one JSON line — the raw material for cloning Slumbot.
+    #[test]
+    fn logs_one_json_line_per_completed_hand() {
+        let path = std::env::temp_dir().join("slumbot_log_test.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let mut t = Flaky {
+            new_hands: vec![Ok(sb_hand("T5")), Ok(sb_hand("T5"))],
+            acts: vec![Ok(sb_hand_won("T5")), Ok(sb_hand_won("T5"))],
+        };
+        let policy = empty_policy();
+        let cfg = SlumbotCfg {
+            hands: 2,
+            search: None,
+            seed: 3,
+            token: None,
+            verbose: false,
+            log: Some(path.to_string_lossy().into_owned()),
+        };
+        let r = run(&policy, &mut t, &cfg, &mut |_, _| {}).unwrap();
+        assert_eq!(r.hands, 2);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per completed hand");
+        for l in lines {
+            let v: Value = serde_json::from_str(l).unwrap();
+            assert_eq!(v.get("action").and_then(|a| a.as_str()), Some("cf"));
+            assert_eq!(v.get("winnings").and_then(|w| w.as_i64()), Some(100));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn act_transport_error_counts_desync_and_run_continues() {
         let mut t = Flaky {
@@ -753,6 +808,7 @@ mod tests {
             seed: 3,
             token: None,
             verbose: false,
+            log: None,
         };
         let r = run(&policy, &mut t, &cfg, &mut |_, _| {}).unwrap();
         assert_eq!(r.desyncs, 1, "the failed hand is a desync, not a crash");
@@ -773,6 +829,7 @@ mod tests {
             seed: 3,
             token: None,
             verbose: false,
+            log: None,
         };
         let r = run(&policy, &mut t, &cfg, &mut |_, _| {}).unwrap();
         assert_eq!(r.hands, 1);
@@ -813,6 +870,7 @@ mod tests {
             seed: 3,
             token: None,
             verbose: true,
+            log: None,
         };
         let r = run(&policy, &mut t, &cfg, &mut |_, _| {}).unwrap();
         assert_eq!(r.hands, 1);

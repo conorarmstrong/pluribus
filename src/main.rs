@@ -336,6 +336,10 @@ enum Cmd {
         /// Log per-hand protocol problems.
         #[arg(long)]
         verbose: bool,
+        /// Append each hand's final API response (JSON lines) — data for
+        /// opponent modeling.
+        #[arg(long)]
+        log: Option<String>,
     },
     /// Print blueprint statistics.
     Inspect {
@@ -866,6 +870,7 @@ fn main() {
             password,
             seed,
             verbose,
+            log,
         } => {
             let net = value_net.map(|p| {
                 let n = valuenet::ValueNet::load(&p)
@@ -896,6 +901,7 @@ fn main() {
                 seed,
                 token,
                 verbose,
+                log,
             };
             println!("playing {hands} hands vs Slumbot (search: {search})...");
             let started = std::time::Instant::now();
