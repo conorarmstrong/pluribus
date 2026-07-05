@@ -299,3 +299,20 @@ Verdict: NULL — 3× training + exact buckets moved nothing. Iteration
 count is not the binding constraint; the 12-bucket abstraction is.
 Next: bucket scaling (`--buckets 36`, running) — river granularity is
 now free (exact tables cost the same at any bucket count).
+
+### Bucket scaling, first point: 36 buckets @ equal iterations is WORSE
+
+- bp_hu200_b36.bin: `--buckets 36`, 300M iters, 2.5h (33,930 iters/s),
+  13.5M infosets (3× the 12-bucket count)
+
+| Config | vs Slumbot (2k hands, blueprint-only, seed 3) |
+|--------|------------------------------------------------|
+| 12 buckets @ 300M | −719.0 ±867.3 |
+| 36 buckets @ 300M | −1128.2 ±1014.9 |
+
+Reading: not a refutation of bucket scaling — 3× infosets at equal
+iterations means 1/3 the visits each (granularity/convergence
+tradeoff). Visit-parity test running: 36 buckets @ 1B iterations
+(bp_hu200_b36_1b). If THAT is also ≤ the 12-bucket line, the 200bb
+wall is the bet-menu abstraction, not card buckets. Note all 2k-hand
+CIs are ±0.8-1.0k mbb — differences under ~400 are suggestive only.
