@@ -316,3 +316,34 @@ tradeoff). Visit-parity test running: 36 buckets @ 1B iterations
 (bp_hu200_b36_1b). If THAT is also ≤ the 12-bucket line, the 200bb
 wall is the bet-menu abstraction, not card buckets. Note all 2k-hand
 CIs are ±0.8-1.0k mbb — differences under ~400 are suggestive only.
+
+### Stage 0+1a: loss autopsy + belief widening (commits `e33db42`..`510b990`)
+
+Root-caused the search regression: hard-Bayes range tracking assumes
+the opponent plays the blueprint; against Slumbot the posterior
+concentrates on wrong hands and search optimizes against a fiction.
+Fix: likelihood-calibrated belief widening (opt-in, live play only —
+self-play harnesses keep exact Bayes). Plus per-street loss autopsy.
+
+Command: `slumbot --blueprint bp_hu200_300m.bin --hands 2000 --search
+--search-ms 800 --safe-resolve --seed 5 --verbose` (80 min, 0 desyncs)
+
+| Config (2k hands each) | mbb/hand |
+|------------------------|----------|
+| search, hard-Bayes beliefs | −1649.2 ±925.3 |
+| safe search, hard-Bayes | −1206.7 ±961.2 |
+| blueprint-only | −719.0 ±867.3 |
+| **safe search, widened beliefs** | **−894.0 ±838.2** |
+
+Verdict: widening recovers ~310 mbb over pre-widening safe search and
+lands at blueprint parity (all gaps within CI). Search no longer
+actively hurts; it does not yet help. Stage 1 gate (+100 over
+blueprint) NOT met.
+
+Autopsy (bb/hand by ending street/kind): the river is the entire
+loss — river showdowns −5.18 × 316 hands (−1636 bb) and river folds
+−10.88 × 94 hands (−1023 bb) sum to −1713 of the −1788 bb total net.
+Every "they fold" row is profitable. 6 of 9 pre-river all-in
+stack-offs lost (−200bb each; n tiny). Directs Stage 1b at river
+resolves: villain-led rivers still use tracker-contaminated rollout
+alts instead of carried CFVs.
