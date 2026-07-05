@@ -83,17 +83,20 @@ impl SearchSession {
     }
 
     /// Carried gadget alternatives for a river resolve at `h` given the
-    /// full table history: valid when the line since the turn resolve is on
-    /// the solve's tree and the bot opens the river betting (one street
-    /// separator, at the end — after an opponent river bet the entry CFVs
-    /// no longer describe the resolve root).
+    /// full table history: valid when the turn line since the resolve is on
+    /// the solve's tree. River actions after the street separator do not
+    /// invalidate the carry — the entry CFVs are the opponent's constraint
+    /// values, and continual resolving keeps those fixed across the
+    /// opponent's own actions (the gadget offers "opt out at river entry"),
+    /// so villain-led rivers use them too instead of rollout estimates.
     fn river_alt(&self, h: &Hand, hist: &[u8]) -> Option<Vec<f64>> {
         let carry = self.carry.as_ref()?;
         let suffix = hist.get(self.root_hist_len..)?;
-        let (&last, line) = suffix.split_last()?;
-        if last != crate::abstraction::TOKEN_STREET_SEP
-            || line.contains(&crate::abstraction::TOKEN_STREET_SEP)
-        {
+        let mut parts = suffix.split(|&t| t == crate::abstraction::TOKEN_STREET_SEP);
+        let line = parts.next()?;
+        // Exactly one separator: the turn→river transition.
+        parts.next()?;
+        if parts.next().is_some() {
             return None;
         }
         carry.alt_for(line, *h.board().get(4)?)
@@ -904,6 +907,25 @@ mod tests {
             .expect("carried CFVs must cover the line actually played");
         assert_eq!(alt.len(), crate::search::NUM_COMBOS);
         assert!(alt.iter().all(|v| v.is_finite()));
+
+        // Villain river actions must not invalidate the carry: the entry
+        // CFVs are the opponent's constraint values and those are unchanged
+        // by the opponent's own actions (continual resolving). A villain
+        // check and a villain bet ahead of us must both still match, and
+        // must return the same entry values as the unled lookup.
+        for tok in [AbsAction::CheckCall.token(), AbsAction::Bet(3).token()] {
+            let mut led = table.hist.clone();
+            led.push(tok);
+            let led_alt = session
+                .river_alt(&table.real, &led)
+                .expect("villain-led river must still use the carried CFVs");
+            assert_eq!(led_alt, alt);
+        }
+        // A second street separator can never occur after a turn resolve;
+        // such a line is off the carry and must miss cleanly.
+        let mut two_seps = table.hist.clone();
+        two_seps.push(crate::abstraction::TOKEN_STREET_SEP);
+        assert!(session.river_alt(&table.real, &two_seps).is_none());
 
         // And the river decision itself completes through the gadget path.
         let a2 = policy.act_with_search(
