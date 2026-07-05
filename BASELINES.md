@@ -347,3 +347,28 @@ Every "they fold" row is profitable. 6 of 9 pre-river all-in
 stack-offs lost (−200bb each; n tiny). Directs Stage 1b at river
 resolves: villain-led rivers still use tracker-contaminated rollout
 alts instead of carried CFVs.
+
+### Stage 1b: carried-CFV gadget alts on villain-led rivers (commit `569993a`)
+
+The river resolve previously consumed the turn carry only when we
+opened river betting; villain-led rivers fell back to
+tracker-contaminated rollout alts. Fix: match the carry on the turn
+line alone (opponent constraint values are unchanged by the
+opponent's own actions — continual resolving).
+
+Command: `slumbot --blueprint bp_hu200_300m.bin --hands 2000 --search
+--search-ms 800 --safe-resolve --seed 6 --verbose` (81 min, 0 desyncs)
+
+| Config (2k hands each) | mbb/hand |
+|------------------------|----------|
+| safe search, hard-Bayes | −1206.7 ±961.2 |
+| blueprint-only | −719.0 ±867.3 |
+| safe search, widened (1a) | −894.0 ±838.2 |
+| **+ carried river alts (1b)** | **−234.2 ±826.9** |
+
+Autopsy delta vs 1a run: river showdowns −5.18 → −1.84 bb/hand
+(≈ +530 mbb/hand of the +660 total move — the predicted leak, fixed);
+river we-fold −10.88 → −8.83. River total −1713 → −770 bb. Turn
+we-fold slightly worse (−5.30 → −6.50, n 91→112). Point estimate
+clears the Stage 1 gate (+100 over blueprint) by ~500 but CIs
+overlap; 10k-hand confirmation run is the formal gate.
