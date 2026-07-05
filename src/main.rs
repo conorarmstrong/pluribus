@@ -912,6 +912,7 @@ fn main() {
                 r.desyncs,
                 started.elapsed().as_secs_f64()
             );
+            print!("{}", r.autopsy.report());
         }
 
         Cmd::Inspect { blueprint } => {

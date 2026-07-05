@@ -177,6 +177,56 @@ pub struct SlumbotResult {
     pub ci95: f64,
     /// Hands aborted on protocol desync (excluded from the mean).
     pub desyncs: u64,
+    /// Loss autopsy: aggregates by how each hand ended.
+    pub autopsy: Autopsy,
+}
+
+/// Where the money goes: per ending-street × ending-kind totals, keyed by
+/// the final action string's street count and whether the hand ended by
+/// our fold, their fold, or showdown. mbb sums (not means) so cells are
+/// additive; divide by count for per-hand rates.
+#[derive(Debug, Default, Clone)]
+pub struct Autopsy {
+    /// [street 0..4][0 = we folded, 1 = they folded, 2 = showdown]
+    pub count: [[u64; 3]; 4],
+    pub mbb: [[f64; 3]; 4],
+}
+
+impl Autopsy {
+    fn record(&mut self, action: &str, we_folded_last: bool, showdown: bool, mbb: f64) {
+        let st = action.bytes().filter(|&b| b == b'/').count().min(3);
+        let kind = if showdown {
+            2
+        } else if we_folded_last {
+            0
+        } else {
+            1
+        };
+        self.count[st][kind] += 1;
+        self.mbb[st][kind] += mbb;
+    }
+
+    pub fn report(&self) -> String {
+        let streets = ["preflop", "flop", "turn", "river"];
+        let kinds = ["we fold", "they fold", "showdown"];
+        let mut s = String::from(
+            "loss autopsy (per ending street/kind: hands, total bb, bb/hand):\n",
+        );
+        for (si, street) in streets.iter().enumerate() {
+            for (ki, kind) in kinds.iter().enumerate() {
+                let n = self.count[si][ki];
+                if n == 0 {
+                    continue;
+                }
+                let bb = self.mbb[si][ki] / 1000.0;
+                s += &format!(
+                    "  {street:<7} {kind:<9} {n:>5}  {bb:>+9.1}  {:>+7.2}\n",
+                    bb / n as f64
+                );
+            }
+        }
+        s
+    }
 }
 
 /// Mirror of the table state for one Slumbot hand.
@@ -344,12 +394,15 @@ pub fn run(
     let mut token = cfg.token.clone();
     let mut results: Vec<f64> = Vec::with_capacity(cfg.hands as usize);
     let mut desyncs = 0u64;
+    let mut autopsy = Autopsy::default();
+    let mut we_sent_fold = false;
 
     'hands: for h in 0..cfg.hands {
         let mut r = transport.new_hand(token.as_deref())?;
         if let Some(t) = r.get("token").and_then(|t| t.as_str()) {
             token = Some(t.to_string());
         }
+        we_sent_fold = false;
         let mut st = match HandState::build(&r) {
             Ok(s) => s,
             Err(e) => {
@@ -365,7 +418,11 @@ pub fn run(
                 token = Some(t.to_string());
             }
             if let Some(w) = r.get("winnings").and_then(|w| w.as_i64()) {
-                results.push(w as f64 / 100.0 * 1000.0); // chips → mbb
+                let mbb = w as f64 / 100.0 * 1000.0;
+                let action = r.get("action").and_then(|a| a.as_str()).unwrap_or("");
+                let folded = action.trim_end_matches('/').ends_with('f');
+                autopsy.record(action, folded && we_sent_fold, !folded, mbb);
+                results.push(mbb); // chips → mbb
                 if h % 50 == 49 {
                     let mean = results.iter().sum::<f64>() / results.len() as f64;
                     progress(h + 1, mean);
@@ -420,6 +477,7 @@ pub fn run(
             let to_call = st.table.real.to_call();
             let concrete = st.table.apply_abs(a, &policy.abs);
             let incr = to_incr(concrete, to_call);
+            we_sent_fold = incr == "f";
             st.cursor += incr.len();
             let tok = token.as_deref().ok_or("no token")?;
             r = transport.act(tok, &incr)?;
@@ -435,6 +493,7 @@ pub fn run(
         mbb_per_hand: mean,
         ci95: 1.96 * (var / n).sqrt(),
         desyncs,
+        autopsy,
     })
 }
 

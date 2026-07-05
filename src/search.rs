@@ -134,7 +134,22 @@ impl RangeTracker {
                 w * p
             })
             .collect();
-        self.weights[seat] = updates;
+        // Belief widening: when the observed action is UNLIKELY under the
+        // blueprint model of this seat (low range-mass retention), the
+        // model just proved wrong for this opponent — partially undo the
+        // sharpening instead of concentrating on a fiction. Measured live:
+        // hard-Bayes beliefs made search lose ~2× faster vs Slumbot than
+        // no search at all (see BASELINES.md, 4 Jul).
+        let before: f64 = self.weights[seat].iter().sum();
+        let after: f64 = updates.iter().sum();
+        let like = if before > 0.0 { after / before } else { 1.0 };
+        let beta = (OBS_FLOOR / like.max(1e-9)).min(0.75);
+        let old = &self.weights[seat];
+        self.weights[seat] = updates
+            .iter()
+            .zip(old)
+            .map(|(&u, &o)| (1.0 - beta) * u + beta * o * like)
+            .collect();
     }
 
     /// Sample hole cards for every non-folded seat from the tracked ranges,
@@ -193,6 +208,58 @@ mod tests {
     use crate::cfr::make_key;
     use crate::engine::HandConfig;
     use std::collections::{HashMap, HashSet};
+
+    /// Off-model actions must WIDEN the posterior instead of concentrating
+    /// it: with a blueprint where only AA raises, observing a raise still
+    /// favors AA, but far less than hard Bayes' floor ratio (1/0.02 = 50×),
+    /// because a raise from this opponent is evidence the model is wrong.
+    #[test]
+    fn off_model_actions_widen_instead_of_concentrating() {
+        use crate::abstraction::{preflop_bucket, AbsConfig, Abstraction};
+        use crate::cfr::Blueprint;
+        let abs = Abstraction::new(AbsConfig {
+            postflop_buckets: 6,
+            equity_rollouts: 30,
+            cache_cap: 100_000,
+            ..AbsConfig::default()
+        });
+        let h = crate::engine::Hand::new(&HandConfig::default(), 0, fresh_deck());
+        let acts = abs.abstract_actions(&h);
+        let aa = preflop_bucket([51, 50]);
+        let raise_idx = acts
+            .iter()
+            .position(|a| matches!(a, crate::abstraction::AbsAction::Bet(_)))
+            .unwrap();
+        let mut strategies = crate::cfr::StrategyMap::default();
+        for bucket in 0..169u16 {
+            let mut s = vec![0.0f32; acts.len()];
+            if bucket == aa {
+                s[raise_idx] = 1.0;
+            } else {
+                s[1] = 1.0; // check/call
+            }
+            strategies.insert(make_key(bucket, &[]).to_vec(), s);
+        }
+        let bp = Blueprint {
+            strategies,
+            iterations: 1,
+            num_players: 6,
+            abs_cfg: AbsConfig::default(),
+            centroids: None,
+        };
+        let mut t = RangeTracker::new(6);
+        let seat = 3;
+        let taken = acts[raise_idx];
+        t.observe(seat, taken, &h, &[], &bp, &abs);
+        let aa_w = t.weight(seat, parse_cards("As Ah").map(|c| [c[0], c[1]]).unwrap());
+        let junk_w = t.weight(seat, parse_cards("7c 2d").map(|c| [c[0], c[1]]).unwrap());
+        let ratio = aa_w / junk_w;
+        assert!(ratio > 1.5, "AA must still be favored, got ratio {ratio}");
+        assert!(
+            ratio < 15.0,
+            "off-model raise must widen, not hit the hard-Bayes 50×: {ratio}"
+        );
+    }
 
     #[test]
     fn combo_index_is_a_bijection() {
@@ -257,8 +324,12 @@ mod tests {
         let junk = parse_cards("7c 2d").unwrap();
         let p_aa = t.prob(3, [aa_combo[0], aa_combo[1]]);
         let p_junk = t.prob(3, [junk[0], junk[1]]);
+        // Belief widening tempers the hard-Bayes 50× floor ratio (an
+        // off-model raise is also evidence the model is wrong — see
+        // off_model_actions_widen_instead_of_concentrating), but a raise
+        // must still clearly favor the raising hand.
         assert!(
-            p_aa > 40.0 * p_junk,
+            p_aa > 5.0 * p_junk,
             "AA must dominate after a raise: p_aa={p_aa:.5} p_junk={p_junk:.5}"
         );
         // Unobserved seat stays uniform.
