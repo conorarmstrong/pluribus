@@ -123,6 +123,7 @@ impl HttpTransport {
     fn post(&self, endpoint: &str, body: Value) -> Result<Value, String> {
         let url = format!("https://slumbot.com/slumbot/api/{endpoint}");
         let resp = ureq::post(&url)
+            .timeout(std::time::Duration::from_secs(30))
             .set("Content-Type", "application/json")
             .send_json(body)
             .map_err(|e| format!("{endpoint}: {e}"))?;
@@ -401,7 +402,24 @@ pub fn run(
     let mut autopsy = Autopsy::default();
 
     'hands: for h in 0..cfg.hands {
-        let mut r = transport.new_hand(token.as_deref())?;
+        // A dropped connection must not abort a long session: retry
+        // new_hand a few times before giving up on the whole run.
+        let mut r = {
+            let mut attempt = 0;
+            loop {
+                match transport.new_hand(token.as_deref()) {
+                    Ok(v) => break v,
+                    Err(e) if attempt < 2 => {
+                        attempt += 1;
+                        if cfg.verbose {
+                            eprintln!("new_hand failed ({e}); retry {attempt}");
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
         if let Some(t) = r.get("token").and_then(|t| t.as_str()) {
             token = Some(t.to_string());
         }
@@ -482,7 +500,18 @@ pub fn run(
             we_sent_fold = incr == "f";
             st.cursor += incr.len();
             let tok = token.as_deref().ok_or("no token")?;
-            r = transport.act(tok, &incr)?;
+            // Mid-hand transport failure: the hand's outcome is unknown,
+            // so score nothing and move on rather than kill the session.
+            r = match transport.act(tok, &incr) {
+                Ok(v) => v,
+                Err(e) => {
+                    if cfg.verbose {
+                        eprintln!("hand {h}: act failed: {e}");
+                    }
+                    desyncs += 1;
+                    continue 'hands;
+                }
+            };
         }
     }
 
@@ -672,6 +701,82 @@ mod tests {
         assert!((r.mbb_per_hand - 8_000.0).abs() < 1e-9);
         // The check/call policy's wire actions for the whole hand.
         assert_eq!(t.sent, vec!["c", "k", "k", "c", "k"]);
+    }
+
+    /// Transport whose calls can fail: network errors must not abort the
+    /// run (an 8-hour session must survive one dead connection).
+    struct Flaky {
+        new_hands: Vec<Result<Value, String>>,
+        acts: Vec<Result<Value, String>>,
+    }
+
+    impl Transport for Flaky {
+        fn new_hand(&mut self, _token: Option<&str>) -> Result<Value, String> {
+            self.new_hands.remove(0)
+        }
+        fn act(&mut self, _token: &str, _incr: &str) -> Result<Value, String> {
+            self.acts.remove(0)
+        }
+    }
+
+    fn sb_hand(token: &str) -> Value {
+        json!({
+            "token": token,
+            "client_pos": 1,
+            "hole_cards": ["7c", "2d"],
+            "board": [],
+            "action": "",
+        })
+    }
+
+    fn sb_hand_won(token: &str) -> Value {
+        json!({
+            "token": token,
+            "client_pos": 1,
+            "hole_cards": ["7c", "2d"],
+            "board": [],
+            "action": "cf",
+            "winnings": 100,
+        })
+    }
+
+    #[test]
+    fn act_transport_error_counts_desync_and_run_continues() {
+        let mut t = Flaky {
+            new_hands: vec![Ok(sb_hand("T3")), Ok(sb_hand("T3"))],
+            acts: vec![Err("connection reset".into()), Ok(sb_hand_won("T3"))],
+        };
+        let policy = empty_policy();
+        let cfg = SlumbotCfg {
+            hands: 2,
+            search: None,
+            seed: 3,
+            token: None,
+            verbose: false,
+        };
+        let r = run(&policy, &mut t, &cfg, &mut |_, _| {}).unwrap();
+        assert_eq!(r.desyncs, 1, "the failed hand is a desync, not a crash");
+        assert_eq!(r.hands, 1, "the second hand still completes");
+        assert!((r.mbb_per_hand - 1000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn new_hand_transient_error_is_retried() {
+        let mut t = Flaky {
+            new_hands: vec![Err("timed out".into()), Ok(sb_hand("T4"))],
+            acts: vec![Ok(sb_hand_won("T4"))],
+        };
+        let policy = empty_policy();
+        let cfg = SlumbotCfg {
+            hands: 1,
+            search: None,
+            seed: 3,
+            token: None,
+            verbose: false,
+        };
+        let r = run(&policy, &mut t, &cfg, &mut |_, _| {}).unwrap();
+        assert_eq!(r.hands, 1);
+        assert_eq!(r.desyncs, 0);
     }
 
     /// client_pos 1 (we are the small blind / button): we act first
