@@ -422,3 +422,23 @@ the widened-belief river solve calls too loosely. Suspect: WIDEN
 beta cap keeps ranges too wide by the river → solver overestimates
 bluff frequency. Diagnostic seed 9 (flop fix) will isolate how much
 of the −1056 gap the flop fix recovers.
+
+### 6-max standing: 200M blueprint (blueprint.bin), pivot baseline (6 Jul)
+
+The number to beat for the 6-max push. Exploitability lower bounds +
+variance-reduced winrate vs baselines, all seed 1.
+
+| Probe | Result | Hands |
+|-------|--------|-------|
+| BR (exact turn/river best response) | +469.5 ±322.9 mbb/hand | 20k |
+| LBR (local best response) | +331.2 ±320.0 mbb/hand | 20k |
+| eval vs caller (AIVAT+dup) | +3704.8 ±259.8 mbb/hand | 100k |
+| eval vs random (AIVAT+dup) | +4262.0 ±271.9 mbb/hand | 100k |
+
+BR/LBR are exploitability *lower bounds* (mbb/hand a best-responder
+wins blind-vs-blind; 0 = unexploitable). +469 confirms real
+exploitable holes — the 12-bucket abstraction wall again. Consistent
+with the stale build-time numbers (+475/+301/+3735/+4426), so the
+blueprint is intact. Next 6-max lever = deeper/finer blueprint
+(neural or many-bucket abstraction), since HU online-search doesn't
+transfer multiway.
