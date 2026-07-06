@@ -6,6 +6,7 @@ mod bot;
 mod br;
 mod cards;
 mod cfr;
+mod clone;
 mod distill;
 mod engine;
 mod eval;
@@ -340,6 +341,23 @@ enum Cmd {
         /// opponent modeling.
         #[arg(long)]
         log: Option<String>,
+    },
+    /// Build a behavioral clone of Slumbot from a `slumbot --log` JSONL
+    /// file: replay each hand, count Slumbot's abstract actions per
+    /// infoset, and save the normalized strategy in Blueprint format.
+    Clone {
+        /// Hand log written by `slumbot --log`.
+        #[arg(long, default_value = "slumbot_hands.jsonl")]
+        log: String,
+        /// Blueprint supplying the abstraction (buckets + centroids) the
+        /// exploiter will use — must match at train and play time.
+        #[arg(long, default_value = "bp_hu200_300m.bin")]
+        blueprint: String,
+        #[arg(long, default_value = "slumbot_clone.bin")]
+        out: String,
+        /// Fraction of hands held out for top-1 agreement measurement.
+        #[arg(long, default_value_t = 0.1)]
+        holdout: f64,
     },
     /// Print blueprint statistics.
     Inspect {
@@ -919,6 +937,33 @@ fn main() {
                 started.elapsed().as_secs_f64()
             );
             print!("{}", r.autopsy.report());
+        }
+
+        Cmd::Clone {
+            log,
+            blueprint,
+            out,
+            holdout,
+        } => {
+            let policy = load_policy(&blueprint);
+            let (bp, stats) = clone::build(&log, &policy.abs, holdout)
+                .unwrap_or_else(|e| die(&format!("clone build failed: {e}")));
+            println!(
+                "clone: {} hands ({} skipped), {} decisions, {} infosets",
+                stats.hands, stats.skipped, stats.decisions, stats.infosets
+            );
+            let streets = ["preflop", "flop", "turn", "river"];
+            for (s, (hit, n)) in streets.iter().zip(stats.agree) {
+                if n > 0 {
+                    println!(
+                        "  held-out top-1 agreement {s}: {:.1}% ({n} decisions)",
+                        100.0 * hit as f64 / n as f64
+                    );
+                }
+            }
+            bp.save(&out)
+                .unwrap_or_else(|e| die(&format!("cannot save {out}: {e}")));
+            println!("saved clone to {out}");
         }
 
         Cmd::Inspect { blueprint } => {
