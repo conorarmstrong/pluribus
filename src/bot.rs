@@ -239,6 +239,11 @@ impl Policy {
                     return d;
                 }
             }
+            // Without a net, a table-budget MCCFR resolve is worse than the
+            // blueprint here (measured: ≈0 in self-play; vs Slumbot it got
+            // 200bb in at ~18% equity on 51 flops in 10k hands). The exact
+            // turn/river solvers take over on later streets.
+            return self.blueprint_dist(shadow, hist, rng);
         }
         let leaf = (real.street() == Street::Flop).then(|| LeafCfg {
             blueprint: self.blueprint.clone(),
@@ -940,6 +945,79 @@ mod tests {
         );
         let menu = abs.abstract_actions(&table.real);
         assert!(menu.contains(&a2), "river action must be legal, got {a2:?}");
+    }
+
+    /// Heads-up flop with no value net: search must play the blueprint, not
+    /// an 800ms MCCFR resolve. Measured twice: no-net flop resolves ≈ 0 vs
+    /// blueprint in self-play (+30±129), and vs Slumbot they produced 51
+    /// flop all-ins at ~18% average equity (−6600 bb / 10k hands).
+    #[test]
+    fn no_net_flop_search_falls_back_to_the_blueprint() {
+        use crate::search::RangeTracker;
+        use crate::table::Table;
+        let front = parse_cards("2c 7d Ah Kd Qs Js Ts").unwrap();
+        let mut deck = fresh_deck();
+        let mut used = [false; 52];
+        for (i, &c) in front.iter().enumerate() {
+            deck[i] = c;
+            used[c as usize] = true;
+        }
+        let mut idx = front.len();
+        for c in 0..52u8 {
+            if !used[c as usize] {
+                deck[idx] = c;
+                idx += 1;
+            }
+        }
+        let hand_cfg = HandConfig {
+            num_players: 2,
+            stack: 2_000,
+            sb: 50,
+            bb: 100,
+        };
+        let abs = Arc::new(abs_small());
+        let policy = Policy::new(
+            Blueprint {
+                strategies: Default::default(),
+                iterations: 0,
+                num_players: 2,
+                abs_cfg: AbsConfig::default(),
+                centroids: None,
+            },
+            abs.clone(),
+        );
+        let train_cfg = TrainConfig {
+            hand: hand_cfg.clone(),
+            prune_after: u64::MAX,
+            ..TrainConfig::default()
+        };
+        let params = SearchParams {
+            time_ms: 100,
+            max_iters: 5_000,
+            qre_lambda: None,
+            safe_resolve: true,
+            adaptive: false,
+        };
+        let mut table = Table::new(&hand_cfg, 0, deck);
+        table.apply_abs(AbsAction::CheckCall, &abs);
+        table.apply_abs(AbsAction::CheckCall, &abs);
+        assert_eq!(table.real.street(), Street::Flop);
+        let tracker = RangeTracker::new(2);
+        let mut rng = SmallRng::seed_from_u64(3);
+        let (acts, probs) = policy.search_dist(
+            &table.real,
+            &table.shadow,
+            &table.hist,
+            params,
+            &train_cfg,
+            Some(&tracker),
+            None,
+            &mut rng,
+        );
+        let mut rng2 = SmallRng::seed_from_u64(3);
+        let (bp_acts, bp_probs) = policy.blueprint_dist(&table.shadow, &table.hist, &mut rng2);
+        assert_eq!(acts, bp_acts);
+        assert_eq!(probs, bp_probs, "no-net flop must be pure blueprint");
     }
 
     /// Nested re-solving of off-tree bets: the bot must price an off-tree
