@@ -46,6 +46,16 @@ impl AbsAction {
 /// Number of quantiles representing an equity distribution (flop/turn).
 pub const QUANTILES: usize = 8;
 
+/// Opponent hand-strength clusters for OCHS features (preflop strength tiers).
+pub const OCHS_CLUSTERS: usize = 8;
+
+/// Dimension of the combined potential-aware feature: equity-distribution
+/// quantiles (shape) followed by opponent-cluster hand-strength (how the
+/// hand fares against different parts of the opponent range). Reserved so
+/// the dimension-based feature-family dispatch stays unambiguous — must
+/// differ from QUANTILES and from any strategic-fingerprint length.
+pub const COMBINED_DIM: usize = QUANTILES + OCHS_CLUSTERS;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbsConfig {
     /// Number of postflop card buckets per street (k-means clusters on
@@ -108,9 +118,23 @@ impl Centroids {
         }
     }
 
-    /// Strategic centroids are recognized by their feature dimension.
+    /// Sample random situations per street and cluster their combined
+    /// potential-aware feature (quantiles + OCHS) with L1 k-medians.
+    pub fn train_combined(cfg: &AbsConfig, samples: usize, seed: u64) -> Centroids {
+        Centroids {
+            flop: train_street_combined(cfg, 3, samples, seed),
+            turn: train_street_combined(cfg, 4, samples, seed ^ 0x5EED_5EED),
+        }
+    }
+
+    /// Feature family, recognized by centroid dimension. Equity quantiles and
+    /// the combined OCHS feature are self-contained; strategic fingerprints
+    /// need the previous blueprint at bucket time.
     pub fn is_strategic(&self) -> bool {
-        self.flop.first().map(|v| v.len()) != Some(QUANTILES)
+        !matches!(
+            self.flop.first().map(|v| v.len()),
+            Some(QUANTILES) | Some(COMBINED_DIM)
+        )
     }
 }
 
@@ -452,6 +476,16 @@ impl Abstraction {
         let _ = rng;
         let mut krng = SmallRng::seed_from_u64(ckey ^ 0xD1CE_5EED_0BAD_F00D);
         let b = match street_cents {
+            Some(cents) if cents.first().map(|v| v.len()) == Some(COMBINED_DIM) => {
+                let f = combined_features(
+                    hole,
+                    board,
+                    self.cfg.dist_runouts,
+                    self.cfg.runout_rollouts,
+                    &mut krng,
+                );
+                nearest_centroid(&f, cents)
+            }
             Some(cents) if cents.first().map(|v| v.len()) != Some(QUANTILES) => {
                 let sc = self.strat.as_ref().expect(
                     "strategic centroids need the previous blueprint (--strat-prev)",
@@ -792,6 +826,142 @@ pub fn equity_quantiles(
     q
 }
 
+/// Preflop strength tier (0 = weakest .. OCHS_CLUSTERS-1 = strongest) for
+/// each of the 169 canonical preflop buckets, split into equal-count tiers
+/// by all-in preflop equity vs a random hand. Computed once, deterministic.
+fn preflop_tiers() -> &'static [u8; 169] {
+    use std::sync::OnceLock;
+    static TIERS: OnceLock<[u8; 169]> = OnceLock::new();
+    TIERS.get_or_init(|| {
+        // Representative hole cards for each preflop bucket, then MC equity.
+        let mut eq = [0f32; 169];
+        for (b, e) in eq.iter_mut().enumerate() {
+            let a = (b / 13) as u8;
+            let c = (b % 13) as u8;
+            let hole = if a == c {
+                [make(a, 0), make(a, 1)] // pair
+            } else if a > c {
+                [make(a, 0), make(c, 0)] // suited hi,lo
+            } else {
+                [make(c, 0), make(a, 1)] // offsuit hi=c, lo=a
+            };
+            let mut rng = SmallRng::seed_from_u64(0x0C45_0000 ^ b as u64);
+            *e = equity_vs_random(hole, &[], 800, &mut rng) as f32;
+        }
+        // Rank buckets by equity, assign to OCHS_CLUSTERS equal-count tiers.
+        let mut order: Vec<usize> = (0..169).collect();
+        order.sort_by(|&i, &j| eq[i].partial_cmp(&eq[j]).unwrap());
+        let mut tiers = [0u8; 169];
+        for (rank, &b) in order.iter().enumerate() {
+            tiers[b] = (rank * OCHS_CLUSTERS / 169).min(OCHS_CLUSTERS - 1) as u8;
+        }
+        tiers
+    })
+}
+
+fn make(rank: u8, suit: u8) -> Card {
+    (rank << 2) | suit
+}
+
+/// Combined potential-aware feature: the QUANTILES equity-distribution
+/// quantiles (already potential-aware over runouts) concatenated with an
+/// OCHS_CLUSTERS-vector of the hand's equity against each opponent strength
+/// tier. The OCHS part makes the feature opponent-relative — hands that beat
+/// weak ranges but lose to strong ones separate from uniformly-mediocre
+/// hands, which the equity-vs-uniform quantiles alone cannot express.
+pub fn combined_features(
+    hole: [Card; 2],
+    board: &[Card],
+    runouts: u32,
+    rollouts: u32,
+    rng: &mut SmallRng,
+) -> [f32; COMBINED_DIM] {
+    use crate::eval::eval_hole_board;
+    use rand::Rng;
+    debug_assert!(!board.is_empty() && board.len() < 5);
+
+    let q = equity_quantiles(hole, board, runouts, rollouts, rng);
+
+    let mut used = [false; 52];
+    used[hole[0] as usize] = true;
+    used[hole[1] as usize] = true;
+    for &c in board {
+        used[c as usize] = true;
+    }
+    let mut unseen = [0u8; 52];
+    let mut unseen_len = 0;
+    for c in 0..52u8 {
+        if !used[c as usize] {
+            unseen[unseen_len] = c;
+            unseen_len += 1;
+        }
+    }
+    let need = 5 - board.len();
+    let mut full = [0u8; 5];
+    full[..board.len()].copy_from_slice(board);
+    let tiers = preflop_tiers();
+
+    // One MC pass; each opponent hand is credited to its preflop tier.
+    let mut sum = [0f64; OCHS_CLUSTERS];
+    let mut cnt = [0u32; OCHS_CLUSTERS];
+    let samples = runouts * rollouts;
+    for _ in 0..samples {
+        // Draw an opponent hand + the remaining board from `unseen`.
+        for k in 0..(need + 2) {
+            let j = rng.random_range(k..unseen_len);
+            unseen.swap(k, j);
+        }
+        let opp = [unseen[0], unseen[1]];
+        for i in 0..need {
+            full[board.len() + i] = unseen[2 + i];
+        }
+        let tier = tiers[preflop_bucket(opp) as usize] as usize;
+        let ours = eval_hole_board(&hole, &full);
+        let theirs = eval_hole_board(&opp, &full);
+        let s = if ours > theirs {
+            1.0
+        } else if ours == theirs {
+            0.5
+        } else {
+            0.0
+        };
+        sum[tier] += s;
+        cnt[tier] += 1;
+    }
+
+    let mut out = [0f32; COMBINED_DIM];
+    out[..QUANTILES].copy_from_slice(&q);
+    for t in 0..OCHS_CLUSTERS {
+        out[QUANTILES + t] = if cnt[t] > 0 {
+            (sum[t] / cnt[t] as f64) as f32
+        } else {
+            0.5
+        };
+    }
+    out
+}
+
+fn train_street_combined(
+    cfg: &AbsConfig,
+    board_len: usize,
+    samples: usize,
+    seed: u64,
+) -> Vec<Vec<f32>> {
+    let points: Vec<Vec<f32>> = (0..samples)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng =
+                SmallRng::seed_from_u64(seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut deck = fresh_deck();
+            deck.shuffle(&mut rng);
+            let hole = [deck[0], deck[1]];
+            let board = deck[2..2 + board_len].to_vec();
+            combined_features(hole, &board, cfg.dist_runouts, cfg.runout_rollouts, &mut rng).to_vec()
+        })
+        .collect();
+    kmedians(&points, cfg.postflop_buckets as usize, 25, seed)
+}
+
 /// EMD between two 1-D equity distributions in quantile form = mean L1
 /// distance between the quantile vectors.
 pub(crate) fn l1(a: &[f32], b: &[f32]) -> f64 {
@@ -1066,6 +1236,64 @@ mod tests {
         // 200 is nearer 182 (33% open) than 225 (50%) in log space.
         assert_eq!(a.map_raise(&h, 200), AbsAction::Bet(1));
         assert_eq!(a.map_raise(&h, 9_000), AbsAction::AllIn);
+    }
+
+    #[test]
+    fn preflop_tiers_rank_premiums_top_and_trash_bottom() {
+        let t = preflop_tiers();
+        let aa = preflop_bucket([make(12, 0), make(12, 1)]); // pocket aces
+        let kk = preflop_bucket([make(11, 0), make(11, 1)]);
+        let trash = preflop_bucket([make(5, 0), make(0, 1)]); // 72o
+        assert_eq!(t[aa as usize], (OCHS_CLUSTERS - 1) as u8, "AA top tier");
+        assert!(t[kk as usize] >= (OCHS_CLUSTERS - 2) as u8, "KK near top");
+        assert_eq!(t[trash as usize], 0, "72o bottom tier");
+    }
+
+    #[test]
+    fn combined_feature_shape_and_opponent_relativity() {
+        let mut rng = SmallRng::seed_from_u64(7);
+        // Flop where our hand crushes: top set on a dry board.
+        let board = parse_cards("As Kd 7c").unwrap();
+        let nuts = parse_cards("Ah Ac").unwrap(); // set of aces
+        let air = parse_cards("5h 4d").unwrap(); // no pair, no draw
+        let fn_ = combined_features([nuts[0], nuts[1]], &board, 24, 40, &mut rng);
+        let fa = combined_features([air[0], air[1]], &board, 24, 40, &mut rng);
+        // Quantile block is sorted (a distribution's order statistics).
+        for w in fn_[..QUANTILES].windows(2) {
+            assert!(w[1] >= w[0] - 1e-6, "quantile block must be sorted");
+        }
+        // OCHS block: the set beats every opponent tier more often than air.
+        for t in 0..OCHS_CLUSTERS {
+            assert!(
+                fn_[QUANTILES + t] >= fa[QUANTILES + t],
+                "set must fare >= air vs tier {t}"
+            );
+        }
+        // Against the strongest tier the set still wins most of the time;
+        // air loses most of the time.
+        assert!(fn_[QUANTILES + OCHS_CLUSTERS - 1] > 0.6);
+        assert!(fa[QUANTILES + OCHS_CLUSTERS - 1] < 0.4);
+    }
+
+    #[test]
+    fn combined_centroids_are_not_strategic_and_bucket_orders_strength() {
+        let cfg = AbsConfig {
+            postflop_buckets: 8,
+            dist_runouts: 12,
+            runout_rollouts: 20,
+            ..AbsConfig::default()
+        };
+        let cents = Centroids::train_combined(&cfg, 400, 0xC0FFEE);
+        assert!(!cents.is_strategic(), "combined family is self-contained");
+        assert_eq!(cents.flop[0].len(), COMBINED_DIM);
+        let a = Abstraction::with_centroids(cfg, Some(cents));
+        let mut rng = SmallRng::seed_from_u64(1);
+        let board = parse_cards("As Kd 7c").unwrap();
+        let strong = parse_cards("Ah Ac").unwrap();
+        let weak = parse_cards("5h 4d").unwrap();
+        let bs = a.bucket([strong[0], strong[1]], &board, &mut rng);
+        let bw = a.bucket([weak[0], weak[1]], &board, &mut rng);
+        assert!(bs > bw, "set must bucket above air (got {bs} vs {bw})");
     }
 
     #[test]

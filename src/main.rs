@@ -84,6 +84,11 @@ enum Cmd {
         /// Use raw-equity bucketing instead of EMD k-means clustering.
         #[arg(long)]
         raw_buckets: bool,
+        /// Cluster hands by the combined potential-aware feature (equity
+        /// quantiles + opponent-cluster hand strength) instead of equity
+        /// quantiles alone — a richer, opponent-relative card abstraction.
+        #[arg(long)]
+        ochs: bool,
         /// Strategy-aware co-training: cluster hands by how THIS previous
         /// blueprint plays and realizes them, instead of by equity
         /// distributions. The resulting blueprint must be loaded with
@@ -389,6 +394,7 @@ fn main() {
             runouts,
             kmeans_samples,
             raw_buckets,
+            ochs,
             strategic_from,
             train_seed,
             rnr_model,
@@ -442,6 +448,15 @@ fn main() {
                         Some(c)
                     } else if raw_buckets {
                         None
+                    } else if ochs {
+                        println!(
+                            "training OCHS k-means centroids ({buckets} buckets, \
+                             {kmeans_samples} samples/street)..."
+                        );
+                        let t0 = std::time::Instant::now();
+                        let c = Centroids::train_combined(&abs_cfg, kmeans_samples, 0xC1A5);
+                        println!("centroids trained in {:.1}s", t0.elapsed().as_secs_f64());
+                        Some(c)
                     } else {
                         println!(
                             "training EMD k-means centroids ({buckets} buckets, \
