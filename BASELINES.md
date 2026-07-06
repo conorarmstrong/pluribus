@@ -462,3 +462,23 @@ visit dilution, the same effect that made HU 36-buckets worse. BR/LBR
 on the finished blueprint (baseline +469.5/+331.2) is the verdict;
 lower = the modernization beat dilution. Post-train chain also builds
 + measures the 6-max value net (net-vs-no-net paired search gain).
+
+### 6-max modernization VERDICT: exploitability dropped (7 Jul, blueprint_6max_v2)
+
+`train --players 6 --stack 10000 --ochs --buckets 24 --kmeans-samples
+40000 --iters 400000000` → 521.7M infosets, 391.3M stored strategies,
+16GB, 57.2k iters/s (1h56m). 5x the baseline's infoset count — heavy
+visit dilution (<1 visit/infoset avg), yet:
+
+| Probe (20k hands, seed 1) | baseline | v2 (OCHS+wide bets) |
+|---------------------------|----------|---------------------|
+| BR (exploitability LB)    | +469.5 ±322.9 | **+86.9 ±352.2** |
+| LBR                       | +331.2 ±320.0 | **+224.9 ±348.1** |
+
+BR fell 5.4x (lower = closer to unexploitable). The richer/wider
+abstraction more than paid for the dilution: wider sizing leaves the
+best-responder fewer gaps, OCHS separates hands the old features
+lumped. CAVEAT: single-seed diff is ~1.5 sigma unpaired (CIs wide at
+20k); BR is deterministic-per-seed so likely stronger paired.
+Confirmation sweep (BR+LBR seeds 2-4) running before building the
+value net (item 2) on this blueprint.
