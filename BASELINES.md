@@ -396,3 +396,29 @@ keep turn/river. Diagnostic 2k run (seed 9) queued. River-showdown
 loss under the exact solver remains the open question — suspects:
 over-widened beliefs by the river (0.75 beta cap), gadget alt quality
 on turn-facing lines.
+
+### Blueprint-only at 10k hands + first blueprint autopsy (data-collection run)
+
+Command: `slumbot --blueprint bp_hu200_300m.bin --hands 10000 --seed 8
+--verbose --log slumbot_hands.jsonl` (4.0h, 0 desyncs; also banked
+10,297 hands of clone data incl. Slumbot's hole cards every hand)
+
+**−714.5 ±331.5 mbb/hand** — confirms the 2k estimates (−719/−782)
+at 3× precision. THE baseline to beat.
+
+Autopsy vs the search gate run (both 10k):
+
+| Cell | blueprint | search (569993a) |
+|------|-----------|------------------|
+| pre-river all-ins | 25 hands, −1600 bb | 84 hands, −9800 bb |
+| flop showdowns | 2 hands, ±0 | 51 hands, −6600 bb |
+| river showdown bb/hand | −3.24 × 1842 | −7.68 × 1568 |
+| river total | −4992 bb | −12305 bb |
+
+Reading: the flop-MCCFR stack-off indictment is airtight (2 vs 51
+flop all-ins), validating fix e539914. Second finding: even the EXACT
+river solver loses 2.4× more per showdown than blueprint river play —
+the widened-belief river solve calls too loosely. Suspect: WIDEN
+beta cap keeps ranges too wide by the river → solver overestimates
+bluff frequency. Diagnostic seed 9 (flop fix) will isolate how much
+of the −1056 gap the flop fix recovers.
