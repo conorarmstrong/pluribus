@@ -482,3 +482,15 @@ lumped. CAVEAT: single-seed diff is ~1.5 sigma unpaired (CIs wide at
 20k); BR is deterministic-per-seed so likely stronger paired.
 Confirmation sweep (BR+LBR seeds 2-4) running before building the
 value net (item 2) on this blueprint.
+
+### CORRECTION: v2 exploitability pooled over 4 seeds (seed-1 was a lucky draw)
+
+v2 (OCHS+wide bets) BR by seed: +86.9, +318.1, +508.2, +243.4 →
+**pooled +289 ±168** (80k hands). LBR: +224.9, +169.5, +304.2,
++499.9 → **pooled +300 ±168**. The dramatic seed-1 BR (+86.9) was a
+favorable draw — same single-seed noise that faked the Slumbot −234.
+Seed spread is huge (BR +87..+508). Baseline was only seed 1
+(+469.5/+331.2), so the comparison isn't yet valid. Measuring the
+baseline (blueprint.bin) across seeds 1-4 with the pre-bet-change
+binary (git worktree @73ad29a — the new binary's wide menu would trip
+the stale-menu guard and corrupt it) for a fair pooled-vs-pooled test.
