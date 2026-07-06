@@ -331,17 +331,21 @@ impl Abstraction {
         self
     }
 
-    /// Bet-size menu (indices into BET_SIZES) for a street and raise count.
+    /// Bet-size menu (indices into BET_SIZES = [25,33,50,75,100,150,200,300])
+    /// for a street and raise count. Wider than the Pluribus baseline: first-in
+    /// menus span a small (25-33%) bet through overbets so the blueprint can
+    /// represent modern sizing, with progressively pruned raise/re-raise menus
+    /// to bound the tree.
     pub fn bet_menu(street: Street, n_raises: u8) -> &'static [u8] {
         match (street, n_raises) {
-            (Street::Preflop, 0) => &[2, 3, 4],   // open: 2.25x, ~2.9x, 3.5x
-            (Street::Preflop, 1) => &[2, 4],      // 3-bet: half-pot, pot
-            (Street::Preflop, 2) => &[4],         // 4-bet: pot
-            (Street::Preflop, _) => &[],          // 5-bet+: call/fold/all-in
-            (Street::Flop, 0) => &[1, 2, 3, 4, 5],    // 33..150%
-            (_, 0) => &[2, 3, 4, 5, 6],           // turn/river: 50..200%
-            (_, 1) => &[2, 4],                    // raise: half-pot, pot
-            (_, 2) => &[4],                       // re-raise: pot
+            (Street::Preflop, 0) => &[1, 2, 3, 4],   // open: 4 sizes
+            (Street::Preflop, 1) => &[2, 4, 6],      // 3-bet: 50/100/200%
+            (Street::Preflop, 2) => &[4, 6],         // 4-bet: pot, overbet
+            (Street::Preflop, _) => &[],             // 5-bet+: call/fold/all-in
+            (Street::Flop, 0) => &[0, 1, 2, 3, 4, 5, 6],  // 25..200%
+            (_, 0) => &[1, 2, 3, 4, 5, 6],           // turn/river: 33..200%
+            (_, 1) => &[2, 3, 4, 6],                 // raise: 50/75/100/200%
+            (_, 2) => &[4, 6],                       // re-raise: pot, overbet
             (_, _) => &[],
         }
     }
@@ -972,8 +976,9 @@ mod tests {
         assert!(acts.contains(&AbsAction::CheckCall));
     }
 
-    /// Elite-tier action abstraction: several open sizes preflop, five
-    /// first-in sizes postflop including turn/river overbets.
+    /// Modern action abstraction: >=4 open sizes preflop, >=7 first-in
+    /// sizes postflop spanning a small bet through overbets on flop AND
+    /// turn/river.
     #[test]
     fn menus_are_wide() {
         use crate::engine::Street;
@@ -983,10 +988,33 @@ mod tests {
                 .filter(|x| matches!(x, AbsAction::Bet(_)))
                 .count()
         };
+        // A first-in menu must span a small (<=40% pot) bet and an overbet
+        // (> pot), neither being the all-in.
+        let spans_small_to_overbet = |h: &Hand, acts: &[AbsAction]| {
+            let pot = h.pot() as f64;
+            let mut small = false;
+            let mut over = false;
+            for &x in acts {
+                if matches!(x, AbsAction::AllIn) {
+                    continue;
+                }
+                if let PlayerAction::RaiseTo(t) = a.concrete(h, x) {
+                    let added = t as f64 - h.current_bet() as f64;
+                    if added <= 0.40 * pot {
+                        small = true;
+                    }
+                    if t as f64 > pot {
+                        over = true;
+                    }
+                }
+            }
+            (small, over)
+        };
+
         let h = h6();
         assert!(
-            n_bets(&a.abstract_actions(&h)) >= 3,
-            "preflop open needs >=3 sizes"
+            n_bets(&a.abstract_actions(&h)) >= 4,
+            "preflop open needs >=4 sizes"
         );
 
         let mut h = h6();
@@ -994,24 +1022,21 @@ mod tests {
             h.apply(PlayerAction::CheckCall);
         }
         assert_eq!(h.street(), Street::Flop);
-        assert!(
-            n_bets(&a.abstract_actions(&h)) >= 5,
-            "flop first-in needs >=5 sizes"
-        );
+        let acts = a.abstract_actions(&h);
+        assert!(n_bets(&acts) >= 7, "flop first-in needs >=7 sizes");
+        let (small, over) = spans_small_to_overbet(&h, &acts);
+        assert!(small, "flop menu must include a small (<=40% pot) bet");
+        assert!(over, "flop menu must include an overbet");
 
         for _ in 0..6 {
             h.apply(PlayerAction::CheckCall);
         }
         assert_eq!(h.street(), Street::Turn);
         let acts = a.abstract_actions(&h);
-        assert!(n_bets(&acts) >= 5, "turn first-in needs >=5 sizes");
-        // An overbet (bigger than pot, not the all-in) must be on the menu.
-        let pot = h.pot();
-        assert!(
-            acts.iter().any(|&x| !matches!(x, AbsAction::AllIn)
-                && matches!(a.concrete(&h, x), PlayerAction::RaiseTo(t) if t > pot)),
-            "turn menu must include an overbet"
-        );
+        assert!(n_bets(&acts) >= 6, "turn first-in needs >=6 sizes");
+        let (small, over) = spans_small_to_overbet(&h, &acts);
+        assert!(small, "turn menu must include a small bet");
+        assert!(over, "turn menu must include an overbet");
     }
 
     #[test]
@@ -1036,9 +1061,10 @@ mod tests {
     fn map_raise_picks_nearest_in_log_space() {
         let a = abs();
         let h = h6();
-        // Abstract raises available: 225, 287, 350 and 10_000 (all-in).
+        // Abstract raises available: 182, 225, 287, 350 and 10_000 (all-in).
         assert_eq!(a.map_raise(&h, 360), AbsAction::Bet(4));
-        assert_eq!(a.map_raise(&h, 200), AbsAction::Bet(2));
+        // 200 is nearer 182 (33% open) than 225 (50%) in log space.
+        assert_eq!(a.map_raise(&h, 200), AbsAction::Bet(1));
         assert_eq!(a.map_raise(&h, 9_000), AbsAction::AllIn);
     }
 
