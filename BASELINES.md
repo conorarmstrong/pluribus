@@ -494,3 +494,18 @@ Seed spread is huge (BR +87..+508). Baseline was only seed 1
 baseline (blueprint.bin) across seeds 1-4 with the pre-bet-change
 binary (git worktree @73ad29a — the new binary's wide menu would trip
 the stale-menu guard and corrupt it) for a fair pooled-vs-pooled test.
+
+### Fair pooled exploitability: v2 vs baseline, same 4 seeds (paired)
+
+Baseline (blueprint.bin, narrow menu, @73ad29a binary) seeds 1-4:
+BR +457.2/+374.9/+569.6/+517.0 (mean +479.7); LBR
++344.5/+152.0/+423.1/+279.5 (mean +299.8).
+v2 seeds 1-4: BR mean +289.2; LBR mean +299.6.
+
+BR is deterministic per seed → PAIRED by seed (same deals). Paired BR
+diffs (base-v2): +370.3/+56.8/+61.4/+273.6, mean +190.5, t≈2.43 df=3
+→ p≈0.09 (~90%, not yet 95%). LBR paired diff mean ≈ +0.2 (no
+change). Reading: wider bets + OCHS probably cut TRUE exploitability
+(BR) ~190 mbb/hand but the local probe (LBR) is flat — a strong
+best-responder finds the closed gaps a local one never exploited.
+Extending to 8 seeds (both blueprints) to settle significance.
