@@ -87,7 +87,8 @@ enum Cmd {
         /// Cluster hands by the combined potential-aware feature (equity
         /// quantiles + opponent-cluster hand strength) instead of equity
         /// quantiles alone — a richer, opponent-relative card abstraction.
-        #[arg(long)]
+        /// Mutually exclusive with the other abstraction modes.
+        #[arg(long, conflicts_with_all = ["raw_buckets", "strategic_from"])]
         ochs: bool,
         /// Strategy-aware co-training: cluster hands by how THIS previous
         /// blueprint plays and realizes them, instead of by equity

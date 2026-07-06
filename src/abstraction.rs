@@ -5,7 +5,7 @@
 //! postflop Monte Carlo equity vs one random hand, quantized into buckets,
 //! memoized in a lock-free cache keyed exactly (packed cards, no hash collisions).
 
-use crate::cards::{fresh_deck, rank, Card};
+use crate::cards::{fresh_deck, make_card, rank, Card};
 use crate::engine::{Hand, PlayerAction, Street};
 use dashmap::DashMap;
 use rand::rngs::SmallRng;
@@ -52,7 +52,7 @@ pub const OCHS_CLUSTERS: usize = 8;
 /// Dimension of the combined potential-aware feature: equity-distribution
 /// quantiles (shape) followed by opponent-cluster hand-strength (how the
 /// hand fares against different parts of the opponent range). Reserved so
-/// the dimension-based feature-family dispatch stays unambiguous — must
+/// the dimension-based feature-family dispatch stays unambiguous: it must
 /// differ from QUANTILES and from any strategic-fingerprint length.
 pub const COMBINED_DIM: usize = QUANTILES + OCHS_CLUSTERS;
 
@@ -839,11 +839,11 @@ fn preflop_tiers() -> &'static [u8; 169] {
             let a = (b / 13) as u8;
             let c = (b % 13) as u8;
             let hole = if a == c {
-                [make(a, 0), make(a, 1)] // pair
+                [make_card(a, 0), make_card(a, 1)] // pair
             } else if a > c {
-                [make(a, 0), make(c, 0)] // suited hi,lo
+                [make_card(a, 0), make_card(c, 0)] // suited hi,lo
             } else {
-                [make(c, 0), make(a, 1)] // offsuit hi=c, lo=a
+                [make_card(c, 0), make_card(a, 1)] // offsuit hi=c, lo=a
             };
             let mut rng = SmallRng::seed_from_u64(0x0C45_0000 ^ b as u64);
             *e = equity_vs_random(hole, &[], 800, &mut rng) as f32;
@@ -859,14 +859,10 @@ fn preflop_tiers() -> &'static [u8; 169] {
     })
 }
 
-fn make(rank: u8, suit: u8) -> Card {
-    (rank << 2) | suit
-}
-
 /// Combined potential-aware feature: the QUANTILES equity-distribution
 /// quantiles (already potential-aware over runouts) concatenated with an
 /// OCHS_CLUSTERS-vector of the hand's equity against each opponent strength
-/// tier. The OCHS part makes the feature opponent-relative — hands that beat
+/// tier. The OCHS part makes the feature opponent-relative: hands that beat
 /// weak ranges but lose to strong ones separate from uniformly-mediocre
 /// hands, which the equity-vs-uniform quantiles alone cannot express.
 pub fn combined_features(
@@ -1241,9 +1237,9 @@ mod tests {
     #[test]
     fn preflop_tiers_rank_premiums_top_and_trash_bottom() {
         let t = preflop_tiers();
-        let aa = preflop_bucket([make(12, 0), make(12, 1)]); // pocket aces
-        let kk = preflop_bucket([make(11, 0), make(11, 1)]);
-        let trash = preflop_bucket([make(5, 0), make(0, 1)]); // 72o
+        let aa = preflop_bucket([make_card(12, 0), make_card(12, 1)]); // pocket aces
+        let kk = preflop_bucket([make_card(11, 0), make_card(11, 1)]);
+        let trash = preflop_bucket([make_card(5, 0), make_card(0, 1)]); // 72o
         assert_eq!(t[aa as usize], (OCHS_CLUSTERS - 1) as u8, "AA top tier");
         assert!(t[kk as usize] >= (OCHS_CLUSTERS - 2) as u8, "KK near top");
         assert_eq!(t[trash as usize], 0, "72o bottom tier");

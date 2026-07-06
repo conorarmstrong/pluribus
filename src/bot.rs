@@ -15,7 +15,32 @@ use crate::engine::{Hand, Street};
 use crate::search::RangeTracker;
 use crate::valuenet::ValueNet;
 use rand::rngs::SmallRng;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Count of blueprint lookups that found an entry whose action-vector length
+/// disagreed with the current menu. Nonzero means the blueprint was trained
+/// with a different bet abstraction than this binary uses, so play silently
+/// falls back to check/call and is badly degraded — surfaced loudly once.
+static MENU_MISMATCHES: AtomicU64 = AtomicU64::new(0);
+static MENU_MISMATCH_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// How many stale-menu blueprint lookups have been seen this process.
+pub fn menu_mismatch_count() -> u64 {
+    MENU_MISMATCHES.load(Ordering::Relaxed)
+}
+
+fn note_menu_mismatch(stored: usize, menu: usize) {
+    MENU_MISMATCHES.fetch_add(1, Ordering::Relaxed);
+    if !MENU_MISMATCH_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "warning: blueprint stores {stored}-action strategies but the current menu \
+             has {menu} actions — this blueprint was trained with a different bet \
+             abstraction. Play falls back to check/call and will be badly degraded. \
+             Retrain the blueprint or run it with a matching binary."
+        );
+    }
+}
 
 /// Bet sizes used by the value-net flop solver (33%, 75%, 150% + all-in):
 /// richer than the turn solver's data-generation menu, still small enough
@@ -142,6 +167,10 @@ impl Policy {
                     let norm: Vec<f64> = probs.iter().map(|x| x / total).collect();
                     return (acts, norm);
                 }
+            } else {
+                // Found the infoset but the stored menu differs: a bet-menu
+                // drift between training and this binary, not an unseen spot.
+                note_menu_mismatch(s.len(), acts.len());
             }
         }
         let mut probs = vec![0.0; acts.len()];
@@ -539,6 +568,42 @@ mod tests {
         for _ in 0..20 {
             assert_eq!(policy.act_blueprint(&h, &[], &mut rng), AbsAction::Fold);
         }
+    }
+
+    /// A blueprint whose stored strategy length no longer matches the
+    /// current action menu (e.g. loaded under a binary with a different bet
+    /// abstraction) must register the mismatch, not silently degrade to a
+    /// calling station. The count distinguishes this from a genuinely
+    /// unseen infoset (which legitimately falls back to check/call).
+    #[test]
+    fn stale_menu_blueprint_is_flagged_not_silently_degraded() {
+        let abs = abs_small();
+        let h = Hand::new(&HandConfig::default(), 0, fresh_deck());
+        let acts = abs.abstract_actions(&h);
+        let bucket = crate::abstraction::preflop_bucket(h.hole(3));
+
+        // Stored strategy has one FEWER action than the current menu — the
+        // signature of a blueprint trained with a narrower bet menu.
+        let mut strategies = crate::cfr::StrategyMap::default();
+        strategies.insert(make_key(bucket, &[]).to_vec(), vec![0.5f32; acts.len() - 1]);
+        let bp = Blueprint {
+            strategies,
+            iterations: 1,
+            num_players: 6,
+            abs_cfg: AbsConfig::default(),
+            centroids: None,
+        };
+        let policy = Policy::new(bp, Arc::new(abs));
+        let mut rng = SmallRng::seed_from_u64(1);
+
+        let before = super::menu_mismatch_count();
+        // It still returns a legal action (check/call fallback)...
+        assert_eq!(policy.act_blueprint(&h, &[], &mut rng), AbsAction::CheckCall);
+        // ...but the mismatch is recorded rather than swallowed.
+        assert!(
+            super::menu_mismatch_count() > before,
+            "a length-mismatched stored strategy must be counted"
+        );
     }
 
     #[test]
