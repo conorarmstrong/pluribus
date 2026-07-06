@@ -372,3 +372,27 @@ river we-fold −10.88 → −8.83. River total −1713 → −770 bb. Turn
 we-fold slightly worse (−5.30 → −6.50, n 91→112). Point estimate
 clears the Stage 1 gate (+100 over blueprint) by ~500 but CIs
 overlap; 10k-hand confirmation run is the formal gate.
+
+### Stage 1 gate: FAILED at 10k hands (run of commit `569993a` code)
+
+Command: `slumbot --blueprint bp_hu200_300m.bin --hands 10000 --search
+--search-ms 800 --safe-resolve --seed 7 --verbose` (6.2h, 0 desyncs)
+
+**−1771.0 ±471.8 mbb/hand.** The 2k-hand −234 (seed 6) was a lucky
+draw; pooled post-widening search (14k hands) ≈ −1426 — worse than
+blueprint-only (−719/−782). Gate decisively not met.
+
+Autopsy at 10k (reliable cell counts): pre-river all-in stack-offs
+−980 mbb/hand of the total — 84 all-in pots averaging −117 bb each
+(≈21% equity at stack-off); the 51 flop all-ins alone −6600 bb (≈18%
+equity). River showdowns −7.68 bb/hand × 1568. Every "they fold" row
+profitable (+1636 mbb/hand summed).
+
+Diagnosis + fix (commit `e539914`): with no value net, flop search
+decisions came from an 800ms MCCFR resolve of a 200bb tree — already
+measured ≈0 vs blueprint in self-play, and the source of the flop
+stack-offs. No-net HU flop now plays the blueprint; exact solvers
+keep turn/river. Diagnostic 2k run (seed 9) queued. River-showdown
+loss under the exact solver remains the open question — suspects:
+over-widened beliefs by the river (0.75 beta cap), gadget alt quality
+on turn-facing lines.
