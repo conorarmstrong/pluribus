@@ -442,3 +442,23 @@ with the stale build-time numbers (+475/+301/+3735/+4426), so the
 blueprint is intact. Next 6-max lever = deeper/finer blueprint
 (neural or many-bucket abstraction), since HU online-search doesn't
 transfer multiway.
+
+### 6-max modernization: OCHS abstraction + wide bets (in training, 6 Jul)
+
+Three frontier-gap fixes (commits: bets `HEAD~2`, OCHS `HEAD~1`):
+- Bet abstraction: first-in menus now 25-33% through 200% overbets
+  (was 3-5 Pluribus-era sizes); raise/re-raise gain a 200% size.
+- Card abstraction: OCHS potential-aware features (8 preflop-tier
+  opponent clusters, hand's equity vs each) concatenated with runout
+  quantiles (dim 16), + 24 buckets (2x baseline). `train --ochs`.
+- Value net (item 2): already ReBeL-shaped (per-hand CFV output, raw
+  ranges/board in) — retrained for 6-max in the post-train chain.
+
+Retrain: `train --players 6 --stack 10000 --ochs --buckets 24
+--kmeans-samples 40000 --iters 400000000` → blueprint_6max_v2.bin.
+27.5k iters/s at start (smoke). RISK: wide bets + finer buckets
+explode infosets (4.7M at 200k iters vs baseline 101M at 200M) →
+visit dilution, the same effect that made HU 36-buckets worse. BR/LBR
+on the finished blueprint (baseline +469.5/+331.2) is the verdict;
+lower = the modernization beat dilution. Post-train chain also builds
++ measures the 6-max value net (net-vs-no-net paired search gain).
