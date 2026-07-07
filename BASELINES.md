@@ -509,3 +509,24 @@ change). Reading: wider bets + OCHS probably cut TRUE exploitability
 (BR) ~190 mbb/hand but the local probe (LBR) is flat — a strong
 best-responder finds the closed gaps a local one never exploited.
 Extending to 8 seeds (both blueprints) to settle significance.
+
+### 8-seed verdict: modernization is a SMALL, NON-SIGNIFICANT improvement
+
+Extended both pools to 8 seeds (paired by seed; br deterministic).
+
+| Probe | baseline (8-seed) | v2 (8-seed) | paired diff | t (df7) | p |
+|-------|-------------------|-------------|-------------|---------|---|
+| BR    | +471.8 | +391.1 | +80.7 ±165 | 0.98 | ~0.36 |
+| LBR   | +353.8 | +240.0 | +113.8 ±167 | 1.36 | ~0.21 |
+
+Both point estimates favor v2 (less exploitable) by ~80-114 mbb/hand
+(~17-24%), SAME direction on both probes — mildly suggestive of a
+small real effect, but NEITHER is significant at 8 seeds. The seed-1
+BR +86.9 and the 4-seed +190 were both favorable draws; v2 BR by seed
+ranges +87..+706. HONEST CONCLUSION: OCHS + wide bets + 24 buckets at
+400M iters did NOT clearly beat the baseline; any gain is small and
+confounded by 5x visit dilution (0.77 visits/infoset). To confirm a
+~20% effect against this variance needs many more seeds OR removing
+the dilution confound (far more iters, or ablate wide-bets to isolate
+OCHS). Code (items 1-3) is sound and committed; the ABSTRACTION-refine
+direction shows limited blueprint payoff so far.
