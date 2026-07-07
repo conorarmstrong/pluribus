@@ -99,6 +99,11 @@ pub struct Trainer {
     qre_lambda: Option<f64>,
     /// Restricted Nash response mixture (blueprint training only).
     rnr: Option<RnrCfg>,
+    /// RNR opponent model as a fixed blueprint (e.g. a cloned static
+    /// opponent). When set, model-opponent traversals sample from this
+    /// strategy instead of `rnr.model`'s baseline. Must share this trainer's
+    /// abstraction so its (bucket, history) keys line up.
+    rnr_opp: Option<Arc<Blueprint>>,
 }
 
 /// Approximate logit quantal-response distribution over a node's actions:
@@ -152,6 +157,7 @@ impl Trainer {
             plus: false,
             qre_lambda: None,
             rnr: None,
+            rnr_opp: None,
         }
     }
 
@@ -162,6 +168,14 @@ impl Trainer {
 
     pub fn with_rnr(mut self, rnr: Option<RnrCfg>) -> Self {
         self.rnr = rnr;
+        self
+    }
+
+    /// Exploit a fixed opponent given as a blueprint (e.g. a cloned static
+    /// bot). The opponent must have been built with this trainer's
+    /// abstraction so bucket/history keys align.
+    pub fn with_rnr_opponent(mut self, opp: Option<Arc<Blueprint>>) -> Self {
+        self.rnr_opp = opp;
         self
     }
 
@@ -360,10 +374,29 @@ impl Trainer {
             node_util
         } else if model_opp {
             // RNR model traversal: the opponent plays the fixed model and
-            // contributes nothing to the learned average strategy.
-            let model = self.rnr.as_ref().expect("model_opp without rnr").model;
-            let a = crate::table::baseline_action(model, h, &self.abs, rng);
-            let a = if acts.contains(&a) { a } else { acts[0] };
+            // contributes nothing to the learned average strategy. A cloned
+            // blueprint opponent (rnr_opp) takes precedence over the baseline
+            // model; both are fixed, not learned.
+            let a = if let Some(opp) = &self.rnr_opp {
+                let p = h.to_act();
+                let bucket = self.abs.bucket(h.hole(p), h.board(), rng);
+                match opp.get(bucket, hist) {
+                    Some(s) if s.len() == acts.len() && s.iter().sum::<f32>() > 0.0 => {
+                        let probs: Vec<f64> = s.iter().map(|&x| x as f64).collect();
+                        acts[sample_index(&probs, rng)]
+                    }
+                    // Unseen/mismatched: the clone's fallback is check/call.
+                    _ => AbsAction::CheckCall,
+                }
+            } else {
+                let model = self.rnr.as_ref().expect("model_opp without rnr").model;
+                let a = crate::table::baseline_action(model, h, &self.abs, rng);
+                if acts.contains(&a) {
+                    a
+                } else {
+                    acts[0]
+                }
+            };
             let mut child = h.clone();
             child.apply(self.abs.concrete(h, a));
             hist.push(a.token());
@@ -772,6 +805,57 @@ mod tests {
         assert!(
             w_rnr.mbb_per_hand > w_nash.mbb_per_hand + 50.0,
             "RNR(caller, 0.9) must exploit a caller more than equilibrium: \
+             rnr {:+.0}±{:.0} vs nash {:+.0}±{:.0}",
+            w_rnr.mbb_per_hand,
+            w_rnr.ci95,
+            w_nash.mbb_per_hand,
+            w_nash.ci95
+        );
+    }
+
+    /// RNR against a blueprint opponent: an empty-strategy blueprint plays
+    /// pure check/call by fallback (a calling station), so exploiting it via
+    /// the blueprint-opponent path must beat equilibrium by clearly more —
+    /// the same result as exploiting Baseline::Caller, validating that the
+    /// clone-opponent traversal drives the exploit.
+    #[test]
+    fn rnr_exploits_a_blueprint_opponent() {
+        use crate::bot::Policy;
+        use crate::table::{run_eval, Baseline};
+
+        let policy_from = |t: Trainer| {
+            t.run(120_000, &|_| {});
+            let bp = t.to_blueprint();
+            let abs = Abstraction::with_centroids(bp.abs_cfg.clone(), bp.centroids.clone());
+            Policy::new(bp, Arc::new(abs))
+        };
+        let empty_opp = Arc::new(Blueprint {
+            strategies: Default::default(),
+            iterations: 0,
+            num_players: 2,
+            abs_cfg: AbsConfig::default(),
+            centroids: None,
+        });
+        let nash = policy_from(push_fold_trainer());
+        let rnr = policy_from(
+            push_fold_trainer()
+                .with_rnr(Some(RnrCfg {
+                    model: Baseline::Caller, // ignored when rnr_opp is set
+                    p: 0.9,
+                }))
+                .with_rnr_opponent(Some(empty_opp)),
+        );
+        let cfg = HandConfig {
+            num_players: 2,
+            stack: 1_000,
+            sb: 50,
+            bb: 100,
+        };
+        let w_nash = run_eval(&nash, &cfg, Baseline::Caller, 40_000, 5);
+        let w_rnr = run_eval(&rnr, &cfg, Baseline::Caller, 40_000, 5);
+        assert!(
+            w_rnr.mbb_per_hand > w_nash.mbb_per_hand + 50.0,
+            "RNR vs a check/call blueprint must exploit more than equilibrium: \
              rnr {:+.0}±{:.0} vs nash {:+.0}±{:.0}",
             w_rnr.mbb_per_hand,
             w_rnr.ci95,

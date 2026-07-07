@@ -103,8 +103,13 @@ enum Cmd {
         /// Restricted Nash response: opponent model (random | caller).
         #[arg(long)]
         rnr_model: Option<Baseline>,
+        /// Restricted Nash response against a cloned opponent given as a
+        /// blueprint file (e.g. slumbot_clone.bin). Overrides --rnr-model;
+        /// the trainer adopts the clone's abstraction so keys align.
+        #[arg(long, conflicts_with = "rnr_model")]
+        rnr_opponent: Option<String>,
         /// RNR mixture weight p (0 = plain equilibrium, 1 = pure best
-        /// response to the model). Requires --rnr-model.
+        /// response to the model). Requires --rnr-model or --rnr-opponent.
         #[arg(long, default_value_t = 0.5)]
         rnr_p: f64,
         /// Disable negative-regret pruning.
@@ -399,6 +404,7 @@ fn main() {
             strategic_from,
             train_seed,
             rnr_model,
+            rnr_opponent,
             rnr_p,
             no_prune,
             threads,
@@ -435,6 +441,26 @@ fn main() {
                         t.node_count()
                     );
                     t
+                }
+                None if rnr_opponent.is_some() => {
+                    let path = rnr_opponent.as_ref().unwrap();
+                    let clone = Blueprint::load(path)
+                        .unwrap_or_else(|e| die(&format!("cannot load clone {path}: {e}")));
+                    println!(
+                        "RNR vs clone {path}: {} strategies, p = {rnr_p} \
+                         (adopting the clone's abstraction)",
+                        clone.strategies.len()
+                    );
+                    // Adopt the clone's abstraction so bucket/history keys align.
+                    let abs =
+                        Abstraction::with_centroids(clone.abs_cfg.clone(), clone.centroids.clone());
+                    let rnr = Some(cfr::RnrCfg {
+                        model: Baseline::Caller, // ignored when rnr_opp is set
+                        p: rnr_p,
+                    });
+                    Trainer::new(Arc::new(abs), train_cfg)
+                        .with_rnr(rnr)
+                        .with_rnr_opponent(Some(Arc::new(clone)))
                 }
                 None => {
                     let strat_ctx = strategic_from.as_ref().map(|p| load_strat_ctx(p));
