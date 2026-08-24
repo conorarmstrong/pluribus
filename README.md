@@ -30,13 +30,24 @@ cargo build --release
 # Lower-bound the blueprint's exploitability with a Local Best Response probe
 ./target/release/pluribus lbr --blueprint blueprint.bin --hands 20000
 
+# Tighter bound: exact turn/river best response (deterministic per seed)
+./target/release/pluribus br --blueprint blueprint.bin --hands 20000 --seed 1
+
 # Replay the 10,000 hands the real Pluribus played (Science 2019) and
 # measure how often this blueprint agrees with its decisions
 ./target/release/pluribus benchmark --blueprint blueprint.bin --dir data/pluribus
 
 # Blueprint statistics
 ./target/release/pluribus inspect --blueprint blueprint.bin
+
+# Heads-up 200bb: train, then play the external Slumbot benchmark
+./target/release/pluribus train --players 2 --stack 20000 --iters 300000000 --out bp_hu200.bin
+./target/release/pluribus slumbot --blueprint bp_hu200.bin --hands 2000 --search --safe-resolve
 ```
+
+Every measured result, with the exact command, artifact hash and caveats,
+is logged in [BASELINES.md](BASELINES.md). What is open and what comes next
+is in [ROADMAP.md](ROADMAP.md).
 
 ## Commands
 
@@ -51,6 +62,7 @@ training exactly.
 | `--iters` | 1,000,000 | MCCFR traversals |
 | `--out` | blueprint.bin | Output strategy file |
 | `--players` | 6 | Players at the table (2-6) |
+| `--stack` | 10,000 | Starting stack in chips; blinds are 50/100, so 10,000 = 100bb (Pluribus) and 20,000 = 200bb (Slumbot) |
 | `--checkpoint <file>` | – | Write a resumable checkpoint every ~5% |
 | `--resume <file>` | – | Continue from a checkpoint (restores abstraction too) |
 | `--buckets` | 12 | Postflop card buckets per street |
@@ -58,10 +70,12 @@ training exactly.
 | `--runouts` | 24 | Sampled future boards per flop/turn distribution |
 | `--kmeans-samples` | 30,000 | Situations sampled per street for clustering |
 | `--raw-buckets` | off | Plain equity quantization instead of k-means |
+| `--ochs` | off | Potential-aware OCHS card abstraction: equity quantiles concatenated with the hand's equity against 8 preflop opponent tiers |
 | `--strategic-from <file>` | – | Co-train: cluster by a previous blueprint's play instead of equity |
 | `--train-seed` | 0 | Traversal RNG seed (distinct seeds → independent self-play runs) |
 | `--rnr-model` | – | Restricted Nash response opponent model (`random`\|`caller`) |
-| `--rnr-p` | 0.5 | RNR mixture weight, 0=equilibrium, 1=pure best response; needs `--rnr-model` |
+| `--rnr-opponent <file>` | – | RNR against a cloned opponent given as a blueprint file (see `clone`); adopts its abstraction |
+| `--rnr-p` | 0.5 | RNR mixture weight, 0=equilibrium, 1=pure best response; needs `--rnr-model` or `--rnr-opponent` |
 | `--no-prune` | off | Disable negative-regret pruning |
 | `--threads` | all cores | Worker threads |
 
@@ -246,6 +260,69 @@ the self-play sanity cell) should land near 0 mbb/hand.
 | `--hands` | 200,000 | Hands played |
 | `--seed` | 1 | RNG seed |
 
+### `distill`
+Expert-iteration flywheel: self-play with online search, recording the
+resolved action distribution at every searched postflop decision, then
+blending those distributions back into the blueprint (`--alpha` sets the
+blend weight). Measured as a negative — see Research experiments — and kept
+for reproducibility. Gate any output with `br`, `crossplay` and `eval`
+before using it.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--blueprint` | blueprint.bin | Teacher/parent blueprint |
+| `--out` | distilled.bin | Output blueprint |
+| `--hands` | 20,000 | Self-play hands (every seat searches) |
+| `--search-ms` | 200 | Per-decision search budget |
+| `--alpha` | 0.5 | Blend weight toward the search distribution |
+| `--value-net` | – | Value net for ReBeL flop solving during self-play |
+| `--safe-resolve` | off | Gadget-safe resolves during self-play |
+| `--seed` | 1 | RNG seed |
+
+### `slumbot`
+Plays the blueprint against [Slumbot](https://www.slumbot.com) over its
+public HTTP API — heads-up NLHE, 200bb stacks resetting per hand, 50/100
+blinds — and reports our winrate in mbb/hand with a per-street loss
+autopsy. This is the project's only *external* opponent: every other number
+here is measured against the bot itself or against fixed baselines, so it is
+the one benchmark that cannot be gamed by a shared abstraction. Train the
+blueprint with `train --players 2 --stack 20000`.
+
+Slumbot's bet sizes are arbitrary, so the nested re-solving path prices them
+at their real size while the shadow hand keeps blueprint lookups on-tree.
+Live play (`play` and `slumbot`) also enables **likelihood-calibrated belief
+widening** in the range tracker: hard Bayes updates assume the opponent
+plays our blueprint, and against a foreign opponent that posterior
+concentrates on the wrong hands. Self-play harnesses keep exact Bayes.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--blueprint` | bp_hu200.bin | HU 200bb blueprint |
+| `--hands` | 1,000 | Hands to play |
+| `--search` | off | Online subgame resolving |
+| `--search-ms` | 800 | Per-decision search budget |
+| `--safe-resolve` | off | Gadget-safe turn/river resolving |
+| `--value-net` | – | Value net (must be trained on 200bb HU spots to help) |
+| `--username` / `--password` | – | Registered slumbot.com account; anonymous otherwise |
+| `--verbose` | off | Log per-hand protocol problems |
+| `--log <file>` | – | Append each hand's final API response as JSON lines |
+| `--seed` | 1 | RNG seed |
+
+### `clone`
+Builds a behavioral clone of Slumbot from a `slumbot --log` JSONL file.
+Slumbot reveals its hole cards every hand, so replaying a logged hand
+reconstructs the exact abstract infoset at each of its decisions; counting
+its chosen abstract actions per infoset and normalizing yields a playable,
+exploitable model of the static opponent in Blueprint format. Feed it to
+`train --rnr-opponent` to train a bounded exploiter.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--log` | slumbot_hands.jsonl | Hand log from `slumbot --log` |
+| `--blueprint` | bp_hu200_300m.bin | Blueprint supplying the abstraction (must match at train and play time) |
+| `--out` | slumbot_clone.bin | Output clone |
+| `--holdout` | 0.1 | Fraction of hands held out for top-1 agreement measurement |
+
 ### `inspect`
 Prints blueprint statistics: trained iteration count, player count, and
 infoset counts overall and per street.
@@ -261,9 +338,11 @@ src/
 │                   option, heads-up order, all-in fast-forward, side pots,
 │                   zero-sum net-chip utilities, targeted hidden-card resampling
 ├── abstraction.rs  Action abstraction (per-street pot-fraction menus + all-in,
-│                   up to 5 sizes incl. overbets) and card abstraction
-│                   (169 canonical preflop hands; flop/turn equity-distribution
-│                   quantiles clustered by EMD k-medians; river equity buckets)
+│                   up to 7 first-in sizes spanning 25% through 200% overbets)
+│                   and card abstraction (169 canonical preflop hands;
+│                   flop/turn equity-distribution quantiles, optionally
+│                   concatenated with potential-aware OCHS features, clustered
+│                   by EMD k-medians; exact river equity buckets)
 ├── cfr.rs          External-sampling Linear MCCFR: parallel (rayon+dashmap),
 │                   negative-regret pruning, CFR+ mode for subgames,
 │                   depth-limited leaves with biased continuation strategies,
@@ -286,6 +365,12 @@ src/
 │                   leaf evaluator trained on turn.rs's exact solves
 ├── portfolio.rs    UCB1 bandit over a portfolio of blueprints (equilibrium
 │                   + restricted-Nash-response exploiters)
+├── distill.rs      Expert-iteration distillation: blend resolved search
+│                   distributions back into the blueprint (measured null)
+├── slumbot.rs      Slumbot HTTP API adapter: the external HU 200bb benchmark,
+│                   incremental action-string parsing, per-street loss autopsy
+├── clone.rs        Behavioral clone of a logged opponent from slumbot --log
+│                   hands, in Blueprint format (the RNR exploit target)
 ├── ablate.rs       Safety ablation: unsafe vs gadget river resolving under
 │                   corrupted range beliefs
 ├── bot.rs          Table policy: blueprint lookup + range-tracked
@@ -310,7 +395,13 @@ made middling pair may share a mean equity but have very different futures,
 and this representation separates them where raw equity cannot. Those
 quantile vectors are clustered into buckets with k-medians under the earth
 mover's distance (for 1-D distributions, L1 between quantile vectors), the
-Johanson/Ganzfried-Sandholm approach. The river uses quantized MC equity.
+Johanson/Ganzfried-Sandholm approach. `--ochs` extends the feature with
+**opponent cluster hand strength**: the hand's equity against each of 8
+preflop opponent strength tiers, concatenated with the quantiles, so hands
+are separated by *who* they beat and not only by how much equity they hold.
+The river uses quantized equity, computed exactly — one O(N) showdown sweep
+per suit-canonical board covers all 1,326 combos at once, which made river
+granularity free at any bucket count.
 Centroids are trained once per blueprint and serialized with it. All cached
 equity work is shared across **suit isomorphism** classes: on a cache miss
 the (hole, board) pair is canonicalized to the lexicographic minimum over
@@ -338,7 +429,7 @@ tracked ranges (see `play` above).
 
 ## Correctness
 
-The project is TDD-built with 101 tests:
+The project is TDD-built with 125 tests:
 
 - evaluator: category spot checks, ordering checks, and a 30k-hand
   differential test against an independent naive evaluator
@@ -395,6 +486,18 @@ The project is TDD-built with 101 tests:
   probe must plan multi-street stack extraction (check turn, shove river);
   net fold values are exact; results reproduce bit-for-bit under a fixed
   seed; and the walk rejects wrong streets and multiway spots
+- Slumbot adapter: the documented action strings parse (street separators,
+  per-street bet amounts, position mapping), our increment encoding matches
+  the protocol, a scripted hand plays end-to-end against a mock API, a
+  transport error counts a desync without aborting the run, a transient
+  new_hand error is retried, and `--log` writes exactly one JSON line per
+  completed hand
+- opponent clone: a preflop raise-fold and a checked-down multi-street hand
+  each replay from the log into the right infosets, and the built clone is a
+  normalized strategy in Blueprint format
+- distillation: blending inserts new distributions and skips menu
+  mismatches, expansion aligns by action identity rather than index, and a
+  smoke run produces a valid blueprint
 - benchmark: PHH parsing, replay in lockstep with the engine, exact chip
   accounting on a real logged hand (and 9,992/9,992 checkable hands of the
   full dataset reproduce their logged finishing stacks exactly)
@@ -408,9 +511,16 @@ The project is TDD-built with 101 tests:
   non-raising hands from an observed raiser's range, and crushes a calling
   station by four figures
 
-Run them with `cargo test`.
+Run them with `cargo test --release`. Release mode is required: four of
+the solver tests are wall-clock budgeted, and an unoptimized build does not
+reach enough CFR iterations inside the budget to satisfy their assertions.
 
-## Results (200M-iteration blueprint, July 2026)
+## Results
+
+Every number below is logged with its command, artifact hash and caveats in
+[BASELINES.md](BASELINES.md), negatives included.
+
+### 6-max blueprint (200M iterations, July 2026)
 
 Blueprint: 12 EMD k-means buckets/street, full bet menus, 128.5M infosets
 (101M exported strategies, 4.3GB), trained in 79 minutes on 16 cores.
@@ -418,10 +528,13 @@ Blueprint: 12 EMD k-means buckets/street, full bet menus, 128.5M infosets
 - **vs baselines** (200k hands each): +4426 ±334 mbb/hand vs random,
   +3735 ±371 vs always-call. AIVAT agrees with half the CI at half the
   hands: +4285 ±273 vs random, +3704 ±260 vs always-call (100k hands).
-- **exploitability lower bound** (LBR, 20k hands blind-vs-blind): the raw
-  blueprint without search is exploitable by at least **+366 ±322
-  mbb/hand** — the expected picture for an abstraction-level blueprint,
-  and the reason Pluribus (and this bot) add real-time search on top.
+- **exploitability lower bounds** (20k hands blind-vs-blind per seed,
+  pooled over 8 seeds): **BR +472**, **LBR +354 mbb/hand**. The raw
+  blueprint without search has real exploitable holes — the expected
+  picture for an abstraction-level blueprint, and the reason Pluribus (and
+  this bot) add real-time search on top. Single seeds swing by hundreds of
+  mbb (the four recorded baseline BR seeds span +375..+570), so seed
+  pooling and pairing are mandatory for any claim about a change.
 - **value network** (20,000 exactly-solved turn spots, 512×512 MLP):
   validation loss 0.00089 weighted MSE ≈ 3% RMS of the maximum forward
   swing. Trained in 7.5 minutes on CPU.
@@ -432,7 +545,9 @@ Blueprint: 12 EMD k-means buckets/street, full bet menus, 128.5M infosets
   *without* the net measures ≈ 0 (−55 ±495; at 150ms budgets it is
   actively harmful, −520 ±399) — undertrained MCCFR resolves are worse
   than a 200M-iteration blueprint, and the learned leaf values are what
-  make real-time flop solving pay.
+  make real-time flop solving pay. Re-measured after exact turn solving
+  landed in *both* arms (40k paired deals, 800ms), the net's edge is
+  **+174 ±100** — the no-net baseline itself got stronger.
 - **vs the real Pluribus** (all 10,000 logged hands, 15,169 decisions,
   99.0% covered): our blueprint picks Pluribus's exact action as its own
   top choice **66.8%** of the time overall (75.6% preflop, ~45-50%
@@ -441,6 +556,54 @@ Blueprint: 12 EMD k-means buckets/street, full bet menus, 128.5M infosets
   for scale, uniform-random agreement would be ~20%. The replay is
   validated chip-for-chip: 9,992/9,992 checkable hands reproduce their
   logged finishing stacks exactly.
+
+### 6-max modernization (400M iterations, blueprint_6max_v2.bin)
+
+OCHS card abstraction + widened bet menus + 24 buckets, 400M iterations:
+521.7M infosets, 391M exported strategies, 16GB, 1h56m at 57.2k iters/s.
+Paired by seed against the 200M baseline over 8 seeds (BR is deterministic
+per seed, so the deals are identical on both sides):
+
+| Probe | baseline | v2 | paired diff | p |
+|-------|----------|-----|-------------|---|
+| BR | +471.8 | +391.1 | +80.7 ±165 | ~0.36 |
+| LBR | +353.8 | +240.0 | +113.8 ±167 | ~0.21 |
+
+Both probes favour v2 (less exploitable) by ~17-24%, but neither is
+significant. Honest verdict: **no clear win**, and confounded by 5× visit
+dilution (0.77 visits/infoset at this iteration budget). Earlier single-seed
+and 4-seed reads of this experiment looked much stronger and were favourable
+draws; they are corrected in BASELINES.md rather than deleted.
+
+### Heads-up 200bb vs Slumbot (external benchmark)
+
+The only opponent here that does not share our abstraction. bp_hu200_300m.bin
+(300M iterations, HU, 200bb, exact river buckets) over Slumbot's public API:
+
+| Config | mbb/hand | Hands |
+|--------|----------|-------|
+| **blueprint only** | **−714.5 ±331.5** | 10,000 |
+| search 800ms, safe resolve | −1771.0 ±471.8 | 10,000 |
+
+We lose. Online search made it *worse*, and the per-street autopsy says why:
+range tracking assumes the opponent plays our blueprint, so against a foreign
+opponent the posterior concentrates on the wrong hands and the resolver
+best-responds to a fiction. Belief widening (+310 mbb) and carried-CFV gadget
+alternatives on villain-led rivers (+660 mbb) recovered most of that, and the
+remaining damage was traced to no-net flop MCCFR resolves stacking off at ~18%
+equity (51 flop all-ins in 10k hands vs 2 for the blueprint) — now routed to
+the blueprint instead. The post-fix 10k run is not yet recorded. Also null
+along the way: 3× more training iterations and exact river bucketing moved
+nothing (−782 → −719), and 36 buckets at equal iterations was worse (−1128).
+
+### Opponent modeling from logged hands
+
+`slumbot --log` banked 10,297 hands with Slumbot's hole cards shown every
+hand; `clone` turns them into a Blueprint-format model — 24,976 decisions
+over 5,107 infosets, held-out top-1 agreement **97.2% preflop / 51.8% flop /
+44.1% turn / 29.3% river**. `train --rnr-opponent slumbot_clone.bin --rnr-p
+<p>` then best-responds to that clone with a bounded-exploitability dial.
+The exploiter has not yet been measured against the live opponent.
 
 ## Research experiments
 
@@ -467,6 +630,20 @@ experiments (all reproducible from the CLI):
   converges to the exploitative arm and outscores equilibrium-alone;
   against opponents that punish exploiters it retreats to the equilibrium
   arm — exploitation with bounded downside.
+- **Expert-iteration distillation** (`distill`): self-play with online
+  search, blending the resolved distributions back into the blueprint. At
+  50,000 self-play hands and α=0.5 the distilled blueprint is
+  indistinguishable from its parent: cross-play **−38.5 ±62.0 mbb/hand**
+  over 1M hands, BR unchanged (+484.5 vs +475.4). A 73-minute generation
+  touches 0.03% of infosets, and on exactly those high-traffic lines a
+  200M-iteration blueprint is already near its best — search's edge lives
+  in rare deep spots self-play rarely revisits. An honest negative; branch
+  closed.
+- **Value-net scaling** (`gen-turn-data` / `train-value-net`): 50,000
+  exactly-solved turn spots and a 1024×1024 net cut validation loss 30%
+  (0.00089 → 0.00062) and bought **+3 mbb/hand** at the table (+174.1 ±99.7
+  vs +171.1 ±100.3 on the same 40k paired deals). Leaf-value accuracy is
+  not the binding constraint at 800ms budgets; branch closed.
 - **Safety ablation** (`ablate-safety`) and **paired search-gain
   measurement** (`eval --search-gain / --net-gain`): see above.
 - **Equilibrium selection in 6-max** (`crossplay`): three independent
@@ -491,11 +668,19 @@ experiments (all reproducible from the CLI):
 
 - Range updates assume every player roughly follows the blueprint (with a
   2% floor per observed action). Pluribus made the same modeling assumption
-  within its abstraction, but tracked exact reach probabilities.
+  within its abstraction, but tracked exact reach probabilities. Against an
+  opponent that is *not* our blueprint this is the dominant weakness: it is
+  what made search a net loss against Slumbot. Live play mitigates it with
+  likelihood-calibrated belief widening and with gadget resolving, which
+  bounds how much a resolve on wrong beliefs can be exploited, but neither
+  is a substitute for estimating the real opponent's ranges.
 - The k-means abstraction clusters Monte-Carlo-sampled situations rather
   than exhaustively enumerating canonical boards, and uses 12 buckets/street
   vs Pluribus's ~200; `--buckets`/`--kmeans-samples` scale it up at the cost
-  of blueprint size and training time.
+  of blueprint size and training time. Scaling it is not free money: at a
+  fixed iteration budget more buckets means fewer visits each, and both
+  bucket-scaling experiments run so far (36 buckets HU, 24 buckets + OCHS
+  6-max) failed to beat their baseline once seed noise was accounted for.
 - Subgame roots trust the blueprint's action menu; there is no re-solving of
   earlier streets when an opponent's line goes far off-tree (the shadow-hand
   mapping absorbs it instead).
@@ -529,6 +714,9 @@ experiments (all reproducible from the CLI):
   AAAI 2018
 - Ganzfried & Sandholm, "Potential-Aware Imperfect-Recall Abstraction with
   Earth Mover's Distance in Imperfect-Information Games", AAAI 2014
+- Johanson, Burch, Valenzano & Bowling, "Evaluating State-Space Abstractions
+  in Extensive-Form Games", AAMAS 2013 (opponent cluster hand strength,
+  `train --ochs`)
 - Johanson, Zinkevich & Bowling, "Computing Robust Counter-Strategies",
   NeurIPS 2007 (restricted Nash response, `--rnr-model`/`--rnr-p`)
 - Auer, Cesa-Bianchi & Fischer, "Finite-time Analysis of the Multiarmed
