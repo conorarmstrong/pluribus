@@ -535,3 +535,7 @@ experiments (all reproducible from the CLI):
   Bandit Problem", Machine Learning 47, 2002 (UCB1, the portfolio bandit)
 - uoftcprg/phh-dataset — Poker Hand History format; the 10,000 Pluribus
   hands used by `benchmark`
+
+## License
+
+MIT. See [LICENSE](LICENSE).

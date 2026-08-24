@@ -2,6 +2,7 @@
 name = "pluribus"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Pluribus-style 6-max no-limit hold'em bot: Linear MCCFR blueprint + optional online subgame resolving"
 
 [dependencies]
