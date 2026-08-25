@@ -723,3 +723,36 @@ calling station than July's narrow-menu reference (+3704.8). Not a
 regression in exploitability (BR says the opposite); the wide menu's
 overbet-heavy lines simply extract less from a station. Worth an ablation
 if station-crushing matters; it does not for the equilibrium goal.
+
+## 2026-08-25 — A2: pruning default at equal wall-clock, plain gets 1.4x and still loses (7/8)
+
+ROADMAP A2. Question: is the pruning gain "prune smarter" or just "explore
+more per iteration"? Plain (per-action pruning) trained for 470M
+iterations, sized to the pruned 200M run's 4013s at plain's 200M rate.
+Plain's rate collapsed as its map grew (82,151 iters/s average), so it
+actually took **5721s = 1.43x** the pruned arm's wall-clock. 412.3M
+infosets (pruned 200M: 402.1M — same tree, more visits).
+
+| Seed | plain 200M | plain 470M | pruned 200M | pruned − plain470 |
+|------|-----------|-----------|-------------|-------------------|
+| 1 | +295.7 | +77.2 | +183.9 | +106.7 (plain better) |
+| 2 | +333.0 | +191.1 | +169.8 | −21.3 |
+| 3 | +594.1 | +533.5 | +103.4 | −430.1 |
+| 4 | +641.3 | +294.2 | +239.9 | −54.3 |
+| 5 | +335.4 | +325.4 | +211.8 | −113.6 |
+| 6 | +625.3 | +280.3 | +260.0 | −20.3 |
+| 7 | +246.7 | +273.2 | +133.3 | −139.9 |
+| 8 | +937.1 | +390.1 | +197.5 | −192.6 |
+| **mean** | **+501.1** | **+295.6** | **+187.5** | pruned better by **+108.2 ±132.6** (t=1.93, df=7, p≈0.10) |
+
+Plain 200M → 470M (2.35x iterations): +205.4 ±165.2 (t=2.94) — more
+visits help a lot. Pruned 200M vs plain 470M: pruned still ahead on 7/8
+seeds with 30% LESS wall-clock, but the margin is not significant at 95%.
+
+VERDICT: default stands. Honest decomposition of the 200M gap of +313:
+roughly +200 is visit-equivalent compute that the exemptions buy per
+iteration (river and terminal-leading actions always explored) and
+roughly +100 is the smarter placement of those visits, the latter
+suggestive (p≈0.10) rather than proven. Practical reading: at any fixed
+wall-clock budget on this machine, pruned-N beats plain-2.35N. Not worth
+more seeds; the decision does not change either way.
