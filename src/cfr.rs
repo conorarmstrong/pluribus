@@ -41,6 +41,24 @@ pub struct TrainConfig {
     /// Traversal RNG seed — distinct seeds give independent self-play runs
     /// (equilibrium-selection studies).
     pub seed: u64,
+    /// Pluribus's pruning rules (Science 2019 supplement, Algorithm 1):
+    /// whether to prune is decided once per traversal (95% of traversals
+    /// prune, 5% explore everything) rather than per action, and pruning
+    /// never applies on the final betting round or to actions that lead
+    /// directly to a terminal node — the river gains nothing from the
+    /// abstraction-refining side effect of pruning, and terminal payoffs
+    /// are cheap to examine. Default on: measured to halve the BR
+    /// exploitability bound at equal iterations (BASELINES.md, Aug 2026).
+    /// `false` restores per-action pruning everywhere.
+    pub pluribus_prune: bool,
+    /// Pluribus's postflop blueprint: no running average strategy after
+    /// the first betting round. Instead `snapshot_strategy` periodically
+    /// adds the current regret-matching strategy of every postflop infoset
+    /// into `strat`, and the blueprint is the mean of those snapshots. The
+    /// average has no convergence guarantee in 6-player poker anyway, and
+    /// the current strategy has already zeroed actions the average still
+    /// carries residual mass on.
+    pub snapshot_avg: bool,
 }
 
 impl Default for TrainConfig {
@@ -51,6 +69,8 @@ impl Default for TrainConfig {
             prune_prob: 0.95,
             prune_after: 200_000,
             seed: 0,
+            pluribus_prune: true,
+            snapshot_avg: false,
         }
     }
 }
@@ -104,6 +124,28 @@ pub struct Trainer {
     /// strategy instead of `rnr.model`'s baseline. Must share this trainer's
     /// abstraction so its (bucket, history) keys line up.
     rnr_opp: Option<Arc<Blueprint>>,
+    /// VR-MCCFR (Schmid et al. 2019): control-variate baselines at sampled
+    /// opponent nodes. The sampled child's value is replaced by
+    /// sum_a sigma(a) b(a) + (v_sampled - b(a_sampled)); unbiased for any
+    /// b, and the variance of the traverser's regret updates shrinks as b
+    /// learns the expected value. Baselines are keyed by the opponent's
+    /// infoset plus the traverser's seat and card bucket (the traverser's
+    /// hand drives most of the value's variance), learned as an
+    /// exponential average with alpha = 0.5. Not checkpointed: a resumed
+    /// run relearns them from zero, which costs variance, not bias.
+    vr: bool,
+    baselines: DashMap<InfoKey, Vec<f32>, ahash::RandomState>,
+}
+
+const BASELINE_ALPHA: f32 = 0.5;
+
+/// Baseline key: opponent infoset key, then the traverser's seat and bucket.
+fn baseline_key(key: &[u8], traverser: usize, bucket: u16) -> InfoKey {
+    let mut k = Vec::with_capacity(key.len() + 3);
+    k.extend_from_slice(key);
+    k.push(traverser as u8);
+    k.extend_from_slice(&bucket.to_le_bytes());
+    k.into_boxed_slice()
 }
 
 /// Approximate logit quantal-response distribution over a node's actions:
@@ -158,6 +200,8 @@ impl Trainer {
             qre_lambda: None,
             rnr: None,
             rnr_opp: None,
+            vr: false,
+            baselines: DashMap::with_hasher(ahash::RandomState::new()),
         }
     }
 
@@ -174,6 +218,11 @@ impl Trainer {
     /// Exploit a fixed opponent given as a blueprint (e.g. a cloned static
     /// bot). The opponent must have been built with this trainer's
     /// abstraction so bucket/history keys align.
+    pub fn with_vr(mut self, vr: bool) -> Self {
+        self.vr = vr;
+        self
+    }
+
     pub fn with_rnr_opponent(mut self, opp: Option<Arc<Blueprint>>) -> Self {
         self.rnr_opp = opp;
         self
@@ -231,7 +280,10 @@ impl Trainer {
                     continue; // degenerate deal (e.g. blinds all-in, tiny stacks)
                 }
                 let weight = t as f64;
-                let prune_ok = t > self.cfg.prune_after;
+                // Pluribus mode decides pruning once per traversal; the
+                // per-action mode keeps prune_ok on and rolls per action.
+                let prune_ok = t > self.cfg.prune_after
+                    && (!self.cfg.pluribus_prune || rng.random::<f64>() < self.cfg.prune_prob);
                 let model_opp = self
                     .rnr
                     .as_ref()
@@ -328,17 +380,27 @@ impl Trainer {
 
         if p == traverser {
             // Full-width over own actions, with negative-regret pruning.
-            let mut explore: Vec<bool> = if prune_ok {
+            let pluribus = self.cfg.pluribus_prune;
+            let mut explore: Vec<bool> = if prune_ok && !(pluribus && h.street() == Street::River) {
                 regrets
                     .iter()
                     .map(|&r| {
                         r >= self.cfg.prune_threshold
-                            || rng.random::<f64>() >= self.cfg.prune_prob
+                            || (!pluribus && rng.random::<f64>() >= self.cfg.prune_prob)
                     })
                     .collect()
             } else {
                 vec![true; acts.len()]
             };
+            let mut children: Vec<Hand> = Vec::with_capacity(acts.len());
+            for (i, &a) in acts.iter().enumerate() {
+                let mut child = h.clone();
+                child.apply(self.abs.concrete(h, a));
+                if pluribus && child.is_terminal() {
+                    explore[i] = true; // terminal payoffs are never pruned
+                }
+                children.push(child);
+            }
             if !explore.iter().any(|&e| e) {
                 explore.iter_mut().for_each(|e| *e = true);
             }
@@ -349,15 +411,14 @@ impl Trainer {
                 if !explore[i] {
                     continue;
                 }
-                let mut child = h.clone();
-                child.apply(self.abs.concrete(h, a));
+                let child = &children[i];
                 let depth = hist.len();
                 hist.push(a.token());
                 if !child.is_terminal() && child.street() != h.street() {
                     hist.push(TOKEN_STREET_SEP);
                 }
                 utils[i] =
-                    self.traverse(&child, hist, traverser, weight, prune_ok, model_opp, rng);
+                    self.traverse(child, hist, traverser, weight, prune_ok, model_opp, rng);
                 hist.truncate(depth);
                 node_util += sigma[i] * utils[i];
             }
@@ -416,9 +477,11 @@ impl Trainer {
                 }
                 None => sigma,
             };
-            if let Some(mut node) = self.nodes.get_mut(&key) {
-                for (st, &d) in node.strat.iter_mut().zip(&dist) {
-                    *st += weight * d;
+            if !(self.cfg.snapshot_avg && h.street() != Street::Preflop) {
+                if let Some(mut node) = self.nodes.get_mut(&key) {
+                    for (st, &d) in node.strat.iter_mut().zip(&dist) {
+                        *st += weight * d;
+                    }
                 }
             }
             let idx = sample_index(&dist, rng);
@@ -430,7 +493,20 @@ impl Trainer {
                 hist.push(TOKEN_STREET_SEP);
             }
             // No truncation needed: the nearest traverser ancestor restores hist.
-            self.traverse(&child, hist, traverser, weight, prune_ok, model_opp, rng)
+            let v = self.traverse(&child, hist, traverser, weight, prune_ok, model_opp, rng);
+            if !self.vr {
+                return v;
+            }
+            let tb = self.abs.bucket(h.hole(traverser), h.board(), rng);
+            let bkey = baseline_key(&key, traverser, tb);
+            let mut b = self
+                .baselines
+                .entry(bkey)
+                .or_insert_with(|| vec![0.0f32; acts.len()]);
+            let expected: f64 = b.iter().zip(&dist).map(|(&bi, &d)| bi as f64 * d).sum();
+            let corrected = expected + (v - b[idx] as f64);
+            b[idx] += BASELINE_ALPHA * (v as f32 - b[idx]);
+            corrected
         }
     }
 
@@ -530,6 +606,27 @@ impl Trainer {
             }
         }
         h.utilities()[traverser] as f64
+    }
+
+    /// Snapshot mode: add every postflop infoset's current regret-matching
+    /// strategy into its `strat` accumulator. Called periodically after a
+    /// warm-up; the exported blueprint is the mean of the snapshots.
+    /// Returns the number of infosets snapshotted.
+    pub fn snapshot_strategy(&self) -> usize {
+        let mut n = 0;
+        let mut s = Vec::new();
+        for mut e in self.nodes.iter_mut() {
+            let postflop = e.key()[2..].contains(&TOKEN_STREET_SEP);
+            if !postflop {
+                continue;
+            }
+            regret_matching(&e.regret, &mut s);
+            for (st, &p) in e.strat.iter_mut().zip(&s) {
+                *st += p;
+            }
+            n += 1;
+        }
+        n
     }
 
     /// Normalized average strategy for an infoset, if visited.
@@ -909,6 +1006,76 @@ mod tests {
             "button must not fold AA, got fold prob {:.3}",
             btn_aa[0]
         );
+    }
+
+    /// VR-MCCFR baselines are a control variate: they must be populated and
+    /// finite after training, and must not move the fixed point. The
+    /// push/fold checks that are stable across seeds at this budget (AA
+    /// calls a shove, the button never folds AA) must still hold.
+    #[test]
+    fn vr_baselines_are_learned_and_unbiased() {
+        let t = push_fold_trainer().with_vr(true);
+        t.run(80_000, &|_| {});
+        assert!(!t.baselines.is_empty(), "baselines never populated");
+        assert!(t
+            .baselines
+            .iter()
+            .all(|e| e.value().iter().all(|v| v.is_finite())));
+        // Some baseline must have learned a non-zero value: the sampled
+        // child values feeding the EMA are chip utilities.
+        assert!(t.baselines.iter().any(|e| e.value().iter().any(|&v| v != 0.0)));
+
+        let aa = preflop_bucket([make_card(12, 0), make_card(12, 1)]);
+        let shove_hist = [AbsAction::AllIn.token()];
+        let aa_call = t.avg_strategy(aa, &shove_hist).expect("AA-vs-shove visited");
+        assert!(aa_call[1] > 0.8, "AA should call a shove, got {:.3}", aa_call[1]);
+        let btn_aa = t.avg_strategy(aa, &[]).expect("root AA visited");
+        assert!(btn_aa[0] < 0.1, "button must not fold AA, got {:.3}", btn_aa[0]);
+    }
+
+    /// Pluribus pruning rules (per-traversal decision, river and terminal
+    /// exemptions) must keep the push/fold fixed point under aggressive
+    /// pruning.
+    #[test]
+    fn pluribus_prune_keeps_the_fixed_point() {
+        let mut t = push_fold_trainer();
+        t.cfg.prune_after = 1_000; // prune almost from the start
+        t.cfg.prune_threshold = -1.0; // ...anything with negative regret
+        t.cfg.pluribus_prune = true;
+        t.run(60_000, &|_| {});
+        let aa = preflop_bucket([make_card(12, 0), make_card(12, 1)]);
+        let shove_hist = [AbsAction::AllIn.token()];
+        let aa_call = t.avg_strategy(aa, &shove_hist).expect("AA-vs-shove visited");
+        assert!(aa_call[1] > 0.8, "AA should call a shove, got {:.3}", aa_call[1]);
+        let btn_aa = t.avg_strategy(aa, &[]).expect("root AA visited");
+        assert!(btn_aa[0] < 0.1, "button must not fold AA, got {:.3}", btn_aa[0]);
+    }
+
+    /// Snapshot averaging: postflop strategies come only from snapshots
+    /// (zero before the first one), preflop keeps the running average.
+    #[test]
+    fn snapshot_avg_fills_postflop_only_from_snapshots() {
+        let mut t = push_fold_trainer();
+        t.cfg.snapshot_avg = true;
+        t.run(20_000, &|_| {});
+        let postflop_before = t
+            .nodes
+            .iter()
+            .filter(|e| e.key()[2..].contains(&TOKEN_STREET_SEP))
+            .filter(|e| e.strat.iter().any(|&x| x != 0.0))
+            .count();
+        assert_eq!(postflop_before, 0, "postflop strat accumulated without a snapshot");
+        let aa = preflop_bucket([make_card(12, 0), make_card(12, 1)]);
+        assert!(t.avg_strategy(aa, &[]).is_some(), "preflop running average missing");
+        let n = t.snapshot_strategy();
+        assert!(n > 0);
+        let postflop_after = t
+            .nodes
+            .iter()
+            .filter(|e| e.key()[2..].contains(&TOKEN_STREET_SEP))
+            .filter(|e| normalize(&e.strat).is_some())
+            .count();
+        assert_eq!(postflop_after, n);
     }
 
     /// Subgame solving uses CFR+ (regret matching+): cumulative regrets are

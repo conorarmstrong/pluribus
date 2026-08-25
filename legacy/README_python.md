@@ -1,5 +1,7 @@
 # Pluribus-Style Poker Bot
 
+**Retired.** This is the original Python implementation, kept for history; it was replaced by the Rust rewrite in the repository root (see ../README.md).
+
 A Python implementation of the Pluribus poker AI system that defeated professional players in 6-player no-limit Texas Hold'em. Based on the research paper "Superhuman AI for multiplayer poker" by Brown & Sandholm (2019).
 
 ## Overview
@@ -349,15 +351,16 @@ print(f"Strategy nodes: {len(bot.blueprint.strategy_sum)}")
 
 ## Performance Benchmarks
 
-Expected performance after training:
+An earlier version of this file carried a table mapping training
+iterations to strength tiers, ending at "100,000,000 iterations =
+Superhuman, 5 days". That table was a guess, never a measurement: this
+Python implementation had a game-engine bug that made training impossible,
+and it was retired for the Rust rewrite in the repository root. Nothing
+here was ever benchmarked.
 
-| Training Iterations | Approximate Strength | Time Required |
-|-------------------|---------------------|---------------|
-| 10,000           | Beginner            | 1 minute      |
-| 100,000          | Intermediate        | 10 minutes    |
-| 1,000,000        | Advanced            | 2 hours       |
-| 10,000,000       | Expert              | 12 hours      |
-| 100,000,000      | Superhuman          | 5 days        |
+Measured results for the current bot, including the exploitability probes,
+baseline winrates and the external Slumbot benchmark, are in the top-level
+README.md and BASELINES.md. The current bot is not superhuman.
 
 ## Contributing
 

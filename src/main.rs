@@ -115,6 +115,22 @@ enum Cmd {
         /// Disable negative-regret pruning.
         #[arg(long)]
         no_prune: bool,
+        /// VR-MCCFR: learned control-variate baselines at sampled opponent
+        /// nodes (Schmid et al. 2019). Unbiased; cuts the variance of every
+        /// regret update, so each visit is worth more.
+        #[arg(long)]
+        vr_baseline: bool,
+        /// Legacy pruning: decide per action and prune everywhere, including
+        /// the river and terminal-leading actions. The default is Pluribus's
+        /// rules (per traversal, river and terminal actions exempt), which
+        /// halved the BR exploitability bound at equal iterations.
+        #[arg(long, conflicts_with = "no_prune")]
+        per_action_prune: bool,
+        /// Pluribus's postflop blueprint: mean of periodic snapshots of the
+        /// current strategy (after a 10% warm-up, every 5% of iterations)
+        /// instead of the linear running average; preflop keeps the average.
+        #[arg(long)]
+        snapshot_avg: bool,
         /// Worker threads (default: all cores).
         #[arg(long)]
         threads: Option<usize>,
@@ -407,6 +423,9 @@ fn main() {
             rnr_opponent,
             rnr_p,
             no_prune,
+            vr_baseline,
+            per_action_prune,
+            snapshot_avg,
             threads,
         } => {
             if let Some(t) = threads {
@@ -429,6 +448,8 @@ fn main() {
                 },
                 prune_after: if no_prune { u64::MAX } else { 200_000 },
                 seed: train_seed,
+                pluribus_prune: !per_action_prune,
+                snapshot_avg,
                 ..TrainConfig::default()
             };
             let trainer = match &resume {
@@ -504,11 +525,15 @@ fn main() {
                     });
                     Trainer::new(Arc::new(abs), train_cfg).with_rnr(rnr)
                 }
-            };
+            }
+            .with_vr(vr_baseline);
 
             println!(
-                "training {players}-max, {iters} iterations, pruning {}",
-                if no_prune { "off" } else { "on" }
+                "training {players}-max, {iters} iterations, pruning {}, vr baselines {}, \
+                 snapshot avg {}",
+                if no_prune { "off" } else if per_action_prune { "per-action" } else { "pluribus" },
+                if vr_baseline { "on" } else { "off" },
+                if snapshot_avg { "on" } else { "off" }
             );
             let pb = ProgressBar::new(iters);
             pb.set_style(
@@ -519,18 +544,24 @@ fn main() {
             );
             let started = std::time::Instant::now();
 
-            // Train in chunks so long runs checkpoint periodically.
-            let chunk = if checkpoint.is_some() {
+            // Train in chunks so long runs checkpoint periodically (and so
+            // snapshot mode can sample the current strategy every 5%).
+            let chunk = if checkpoint.is_some() || snapshot_avg {
                 iters.div_ceil(20).max(100_000).min(iters)
             } else {
                 iters
             };
             let mut done_before = 0u64;
+            let mut snapshots = 0u32;
             while done_before < iters {
                 let this = chunk.min(iters - done_before);
                 let base = done_before;
                 trainer.run(this, &|done| pb.set_position(base + done));
                 done_before += this;
+                if snapshot_avg && done_before * 10 > iters {
+                    trainer.snapshot_strategy();
+                    snapshots += 1;
+                }
                 if let Some(path) = &checkpoint {
                     trainer
                         .save_checkpoint(path)
@@ -538,6 +569,9 @@ fn main() {
                 }
             }
             pb.finish();
+            if snapshot_avg {
+                println!("postflop blueprint = mean of {snapshots} strategy snapshots");
+            }
 
             let secs = started.elapsed().as_secs_f64();
             println!(

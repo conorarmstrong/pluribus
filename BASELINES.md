@@ -530,3 +530,186 @@ confounded by 5x visit dilution (0.77 visits/infoset). To confirm a
 the dilution confound (far more iters, or ablate wide-bets to isolate
 OCHS). Code (items 1-3) is sound and committed; the ABSTRACTION-refine
 direction shows limited blueprint payoff so far.
+
+## 2026-08-24 — Trainer levers, paired 8-seed loop: VR-MCCFR is a clear NEGATIVE
+
+Research pass over 2024-26 CFR work (PDCFR+/dynamic discounting, correlated
+chance sampling, VR-MCCFR, neural/parallel CFR, the Pluribus supplement)
+picked three cheap, sampling-compatible levers to test as opt-in `train`
+flags. Proof loop, chosen so a change is decided in ~1h: both arms trained
+FRESH with the same binary (the 5-action blueprint.bin cannot be probed by
+the 6-action binary), `train --iters 30000000 --train-seed 0` 6-max
+default abstraction, then `br --hands 20000` seeds 1-8 PAIRED by seed
+(deterministic deals), 1M-hand crossplay both directions, and
+`eval --baseline caller --aivat --duplicate` 100k.
+
+Regime note: at 30M iterations the wide menu already yields 139.6M
+infosets (more than the 200M-iteration narrow-menu reference had), i.e.
+~0.2 visits/infoset — deep inside the dilution wall. Absolute BR numbers
+here (~+1750) are therefore far above the 200M reference (+472) and are
+only meaningful paired within this table.
+
+### Arm A: plain (reference for this loop)
+
+`train --iters 30000000 --train-seed 0`: 193.7s, 154,866 iters/s,
+139,648,570 infosets, 106.4M strategies.
+
+### Arm B: `--vr-baseline` (VR-MCCFR, Schmid et al. AAAI 2019)
+
+Control-variate baselines at sampled opponent nodes, keyed by opponent
+infoset + traverser seat + traverser bucket, EMA alpha 0.5; unbiased by
+construction (unit test: fixed point unchanged on 10bb push/fold). On the
+push/fold toy it was already a null (mean L1 to a 4M-iteration reference:
+plain 0.725/0.480/0.314 vs vr 0.713/0.506/0.321 at 40k/160k/640k iters).
+
+Training: 638.6s, 46,974 iters/s (3.3x SLOWER), 142.4M infosets, ~50GB RSS.
+
+| Seed | plain BR | vr BR | vr − plain |
+|------|----------|-------|------------|
+| 1 | +1708.5 | +1938.7 | +230.2 |
+| 2 | +1570.5 | +1688.4 | +117.9 |
+| 3 | +1700.1 | +2141.1 | +441.0 |
+| 4 | +1806.7 | +1829.2 | +22.5 |
+| 5 | +1788.6 | +1829.4 | +40.8 |
+| 6 | +1582.2 | +1628.6 | +46.4 |
+| 7 | +2009.6 | +2032.2 | +22.6 |
+| 8 | +1872.7 | +2298.7 | +426.0 |
+| **mean** | **+1754.9** | **+1923.3** | **+168.4 ±148.5** (t=2.68, df=7, p≈0.03) |
+
+Crossplay 1M hands: vr focal vs plain field −149.1 ±126.4; plain focal vs
+vr field −37.6 ±126.7. Eval vs caller (AIVAT+dup, 100k): plain
++2667.3 ±242.5, vr +1941.4 ±229.2.
+
+VERDICT: significantly MORE exploitable (8/8 seeds), loses head-to-head,
+726 mbb/hand worse vs a calling station, 3.3x slower, 2x memory. Closed.
+Reading: VR-MCCFR's gains need baselines that have converged, i.e. many
+visits per (infoset, action). At 0.2 visits/infoset most baseline entries
+are 1-2-sample estimates, so the correction term
+sum_a sigma(a) b(a) − b(a_sampled) adds noise instead of removing it. The
+lever is aimed at exactly the wrong regime for this blueprint: the
+dilution wall starves it. (In the paper the 250x speedup is on Leduc with
+millions of visits per infoset.) Flag kept as documented opt-in.
+
+### Arm C: `--pluribus-prune` — exploitability HALVED (the win)
+
+Pluribus's own pruning rules from the Science supplement (Algorithm 1,
+p.14): (1) the prune/no-prune decision is made once per traversal (95%
+prune, 5% explore all) instead of per action; (2) no pruning on the final
+betting round; (3) actions leading directly to a terminal node are never
+pruned. This trainer had been pruning per action, everywhere.
+
+Training: 195.6s, 153,409 iters/s (same speed as plain), 167.7M infosets
+(+20%: river and terminal-leading actions are now always explored).
+
+| Seed | plain BR | pluribus-prune BR | improvement |
+|------|----------|-------------------|-------------|
+| 1 | +1708.5 | +853.9 | +854.6 |
+| 2 | +1570.5 | +613.5 | +957.0 |
+| 3 | +1700.1 | +1114.4 | +585.7 |
+| 4 | +1806.7 | +849.1 | +957.6 |
+| 5 | +1788.6 | +981.2 | +807.4 |
+| 6 | +1582.2 | +1011.9 | +570.3 |
+| 7 | +2009.6 | +1071.4 | +938.2 |
+| 8 | +1872.7 | +901.4 | +971.3 |
+| **mean** | **+1754.9** | **+924.6** | **+830.3 ±138.6** (t=14.2, df=7, p<1e-5) |
+
+Eval vs caller (AIVAT+dup, 100k): +2879.8 ±245.5 vs plain +2667.3 ±242.5.
+Crossplay 1M: pprune focal vs plain field −129.7 ±126.0; plain focal vs
+pprune field −45.3 ±125.5 (both directions negative for the focal seat —
+a wash within CI, as every cross-play in this repo has been).
+
+VERDICT: BR exploitability lower bound cut by 47%, 8/8 seeds, every seed
+by 570-970 mbb/hand, no speed cost, +213 vs a calling station. Head-to-
+head is a wash, which is the usual pattern here (cross-play does not see
+exploitability). Reading: per-action pruning on the river is pure loss —
+there is no later street whose abstraction it could sharpen — and
+pruning a terminal-leading action (a fold, a call that closes the action)
+removes exactly the cheap exact payoffs that anchor the regret. Pruning
+"everywhere" was leaving whole river subtrees with regrets frozen at
+their early, wrong values. 200M-iteration confirmation queued (see below).
+
+### Arm D: `--snapshot-avg` — NEGATIVE
+
+Pluribus's postflop blueprint construction (supplement p.15): no running
+average after the first betting round; the blueprint is the mean of
+snapshots of the current regret-matching strategy (here: after a 10%
+warm-up, every 5% → 18 snapshots). Preflop keeps the linear average.
+
+Training: 280.5s incl. 18 full-map snapshot passes (~5s each), 130.0M
+infosets.
+
+BR by seed: +2313.7, +2072.7, +2152.9, +2103.2, +2168.7, +2201.4,
++2120.6, +2342.5 → mean **+2184.5**; paired vs plain **+429.6 ±139.9
+worse** (t=7.3, 8/8 seeds). Eval vs caller +1879.2 ±227.0 (plain
++2667.3). Crossplay: snap focal vs plain −50.3 ±124.1, plain focal vs
+snap −88.7 ±123.6.
+
+VERDICT: significantly more exploitable, and 790 mbb/hand worse vs a
+station. Pluribus chose snapshots for memory, and after ~11,000 minutes
+of training, when 18+ snapshots of a nearly converged current strategy
+average to something close to the true average. At 30M iterations the
+current strategy of a 0.2-visits/infoset blueprint is mostly regret
+noise, and 18 snapshots of noise average to noise; the linearly weighted
+running average at least integrates every visit. Do not use below full
+convergence; probably not worth revisiting at all on this hardware.
+
+### 200M confirmation: Pluribus pruning at reference scale — CONFIRMED, new 6-max standing
+
+Same loop at the reference iteration count. Both arms `train --iters
+200000000 --train-seed 0` (6-max, 12 buckets, wide menu), current binary.
+
+| Arm | train time | iters/s | infosets | strategies |
+|-----|-----------|---------|----------|------------|
+| plain (per-action pruning) | 1706s (28 min) | 117,218 | 306.1M | 232.6M |
+| pluribus-prune | 4013s (67 min) | 49,834 | 402.1M | — |
+
+Speed caveat (new at this scale): with 2.4x the per-iteration cost the
+"no speed cost" seen at 30M does not hold at 200M — the exemptions add
+31% more infosets and the bigger map costs contention. At equal
+wall-clock, plain could run ~480M iterations; not tested.
+
+| Seed | plain 200M | pluribus-prune 200M | improvement | July ref (narrow menu) | July v2 (OCHS, 400M) |
+|------|-----------|---------------------|-------------|------------------------|----------------------|
+| 1 | +295.7 | +183.9 | +111.8 | +457.2 | +86.9 |
+| 2 | +333.0 | +169.8 | +163.2 | +374.9 | +318.1 |
+| 3 | +594.1 | +103.4 | +490.7 | +569.6 | +508.2 |
+| 4 | +641.3 | +239.9 | +401.4 | +517.0 | +243.4 |
+| 5 | +335.4 | +211.8 | +123.6 | | |
+| 6 | +625.3 | +260.0 | +365.3 | | |
+| 7 | +246.7 | +133.3 | +113.4 | | |
+| 8 | +937.1 | +197.5 | +739.6 | | |
+| **mean** | **+501.1** | **+187.5** | **+313.6 ±190.3** (t=3.90, df=7, p≈0.006) | +471.8 (8-seed) | +391.1 (8-seed) |
+
+VERDICT: confirmed. 8/8 seeds, 63% cut in the BR exploitability lower
+bound at reference scale, and the new default blueprint (+187.5) is the
+least exploitable 6-max blueprint this project has produced: 60% below
+the July reference (+471.8) and 52% below the 400M OCHS/wide-bets v2
+(+391.1), at 12 buckets and half v2's iterations. Two side findings:
+(a) the wide bet menu on its own does nothing — plain 200M with the wide
+menu (+501.1) matches the narrow-menu July reference (+471.8; seeds 1-4
+paired: 466.0 vs 479.7); (b) which means July's v2 result (+391) was
+never about OCHS or bet sizes either: with hindsight the whole
+"abstraction refinement" branch was fighting a pruning bug. Pluribus
+pruning rules are now the trainer default (`--per-action-prune`
+restores the old behaviour for comparisons).
+
+Artifact: blueprint_pprune200.bin, hash and tail metrics below.
+
+| File | SHA-256 | Size (bytes) | Produced by |
+|------|---------|--------------|-------------|
+| blueprint_pprune200.bin | `198c7aa2804c89797a23e14ff7bb2fbc37a8ff6911bc87669b091a503a8da880` | 13,376,525,660 | `train --iters 200000000 --train-seed 0` (Pluribus pruning, the new default) |
+| bp_plain200.bin (scratch, not kept) | `f7e52b34613b2347303892e6310d87381679bbb7b60486bb9854d1d3408bade2` | 10,085,728,352 | `train --iters 200000000 --train-seed 0 --per-action-prune` |
+
+Tail metrics (200M arms):
+
+| Metric | plain 200M | pluribus-prune 200M |
+|--------|-----------|---------------------|
+| eval vs caller (AIVAT+dup, 100k) | +2108.9 ±210.2 | **+2742.4 ±227.8** |
+| LBR seed 1 (20k) | +156.6 ±353.5 | +42.5 ±322.4 |
+| crossplay 1M, focal vs other's table | −49.3 ±72.4 (pprune focal) | +40.5 ±72.4 (plain focal) |
+
+Vs-caller note: both wide-menu 200M blueprints win far less against a
+calling station than July's narrow-menu reference (+3704.8). Not a
+regression in exploitability (BR says the opposite); the wide menu's
+overbet-heavy lines simply extract less from a station. Worth an ablation
+if station-crushing matters; it does not for the equilibrium goal.

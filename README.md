@@ -77,6 +77,9 @@ training exactly.
 | `--rnr-opponent <file>` | – | RNR against a cloned opponent given as a blueprint file (see `clone`); adopts its abstraction |
 | `--rnr-p` | 0.5 | RNR mixture weight, 0=equilibrium, 1=pure best response; needs `--rnr-model` or `--rnr-opponent` |
 | `--no-prune` | off | Disable negative-regret pruning |
+| `--per-action-prune` | off | Legacy pruning: decided per action, applied everywhere. The default is Pluribus's rules (decided once per traversal, never on the river, never for actions leading straight to a terminal node), which halved the BR exploitability bound at equal iterations |
+| `--snapshot-avg` | off | Postflop blueprint = mean of periodic snapshots of the current strategy (after a 10% warm-up, every 5%) instead of the linear running average; preflop keeps the average |
+| `--vr-baseline` | off | VR-MCCFR learned control-variate baselines at sampled opponent nodes; unbiased variance reduction per visit |
 | `--threads` | all cores | Worker threads |
 
 ### `play`
@@ -415,8 +418,13 @@ state.
 external-sampling MCCFR traversal for one player: the traverser explores its
 whole action menu, opponents sample from their current regret-matched
 strategy. Regret and average-strategy updates are weighted linearly by
-iteration (Linear CFR). After a warm-up, actions with very negative
-accumulated regret are skipped with 95% probability (Pluribus's pruning).
+iteration (Linear CFR). After a warm-up, 95% of traversals prune: actions
+with very negative accumulated regret are skipped, except on the river and
+except for actions that end the hand outright, which are always explored.
+Those two exemptions are Pluribus's own rules (Science 2019 supplement,
+Algorithm 1) and they matter: against the earlier per-action,
+prune-everywhere scheme they halved this trainer's best-response
+exploitability bound at equal iterations.
 Training runs across all cores on a sharded concurrent hash map keyed by
 `(card bucket, abstract betting history)`; positions are implicit in the
 history, so one blueprint covers every seat.
@@ -429,7 +437,7 @@ tracked ranges (see `play` above).
 
 ## Correctness
 
-The project is TDD-built with 125 tests:
+The project is TDD-built with 128 tests:
 
 - evaluator: category spot checks, ordering checks, and a 30k-hand
   differential test against an independent naive evaluator
@@ -471,7 +479,10 @@ The project is TDD-built with 125 tests:
   strategy (AA calls a shove, 32o folds, the button never folds AA);
   continuation-bias math; checkpoint/blueprint round-trips including
   centroids; restricted Nash response measurably exploits the modeled
-  opponent
+  opponent; VR-MCCFR baselines are populated, finite and leave the fixed
+  point alone; Pluribus pruning rules keep the fixed point under
+  aggressive pruning; snapshot averaging fills postflop strategies only
+  from snapshots while preflop keeps its running average
 - search: range tracking concentrates on the hands that would take the
   observed action; sampling respects weights and card-removal conflicts; a
   rigged nuts-on-the-river resolve must call >90%; a range-tracked,
@@ -595,6 +606,34 @@ equity (51 flop all-ins in 10k hands vs 2 for the blueprint) — now routed to
 the blueprint instead. The post-fix 10k run is not yet recorded. Also null
 along the way: 3× more training iterations and exact river bucketing moved
 nothing (−782 → −719), and 36 buckets at equal iterations was worse (−1128).
+
+### Trainer levers, paired 8-seed loop (August 2026)
+
+Three sampling-compatible trainer changes, each an opt-in flag, decided by
+the same loop: both arms trained fresh at 30M iterations, `br` on 8 seeds
+paired by deal, 1M-hand crossplay, AIVAT eval vs caller.
+
+| Lever | BR (plain +1755) | paired diff | speed | verdict |
+|-------|------------------|-------------|-------|---------|
+| Pluribus pruning rules (now default) | **+925** | **−830 ±139**, 8/8 seeds | same | **adopted** |
+| VR-MCCFR baselines (`--vr-baseline`) | +1923 | +168 ±149 worse, 8/8 | 3.3× slower | closed |
+| Snapshot blueprint (`--snapshot-avg`) | +2185 | +430 ±140 worse, 8/8 | 1.4× slower | closed |
+
+Confirmed at reference scale: at 200M iterations the same change takes the
+8-seed BR bound from **+501 to +188 mbb/hand** (paired −314 ±190, t=3.9,
+8/8 seeds). `blueprint_pprune200.bin` is now the least exploitable 6-max
+blueprint in the project, 60% below the July reference (+472) and 52%
+below the 400M OCHS/wide-bets v2 (+391). Two side findings: the wide bet
+menu on its own does nothing (plain 200M wide-menu +501 vs narrow-menu
++472), and Pluribus pruning costs 2.4× per iteration at 200M (67 vs 28
+min; 402M vs 306M infosets), so the equal-wall-clock comparison is still
+open.
+
+The pruning fix is a two-line rule change with a t-statistic of 14. The
+two published-technique negatives are instructive rather than surprising:
+VR-MCCFR needs converged baselines and snapshot averaging needs a
+converged current strategy, and at 0.2 visits per infoset this blueprint
+has neither. Both are recorded in full in BASELINES.md.
 
 ### Opponent modeling from logged hands
 
@@ -721,6 +760,12 @@ experiments (all reproducible from the CLI):
   NeurIPS 2007 (restricted Nash response, `--rnr-model`/`--rnr-p`)
 - Auer, Cesa-Bianchi & Fischer, "Finite-time Analysis of the Multiarmed
   Bandit Problem", Machine Learning 47, 2002 (UCB1, the portfolio bandit)
+- Schmid, Burch, Lanctot, Moravčík, Kadlec & Bowling, "Variance Reduction in
+  Monte Carlo Counterfactual Regret Minimization (VR-MCCFR) for Extensive
+  Form Games using Baselines", AAAI 2019 (`train --vr-baseline`)
+- Brown & Sandholm, Supplementary Materials for "Superhuman AI for
+  multiplayer poker", Science 2019 (Algorithm 1: the default pruning
+  rules, and the snapshot blueprint behind `--snapshot-avg`)
 - uoftcprg/phh-dataset — Poker Hand History format; the 10,000 Pluribus
   hands used by `benchmark`
 

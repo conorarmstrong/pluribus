@@ -25,6 +25,27 @@ informative front, because Slumbot does not share our abstraction.
 The repo carries 74GB of gitignored `.bin` artifacts (blueprints,
 checkpoints, turn-solve datasets, value nets).
 
+## Done since the roadmap was written
+
+- **Pluribus pruning rules are the default** (24 Aug 2026). The trainer
+  had been pruning per action, everywhere; Pluribus decides per traversal
+  and never prunes the river or terminal-leading actions. Paired 8-seed
+  BR at 30M iterations: +1755 to +925 mbb/hand; at 200M: +501 to +188,
+  every seed both times. `blueprint_pprune200.bin` (+188) is the new
+  6-max standing, 60% below July's reference. Cost: 2.4x per iteration
+  at 200M (31% more infosets), so the equal-wall-clock question (plain
+  at ~480M vs pruned at 200M) is open. Retrain every blueprint before
+  comparing it to anything new.
+- Two July conclusions are revised by this: the wide bet menu on its own
+  is null (+501 vs +472, 8 seeds), so the v2 "modernization" gain was
+  never about OCHS or sizing. Item 4 below is closed as moot.
+- Two published levers tested and closed in the same loop: VR-MCCFR
+  baselines (worse, 3.3x slower) and snapshot-averaged postflop
+  blueprints (worse). See Closed branches.
+- The proof loop itself: `train` both arms fresh at 30M iterations, `br`
+  seeds 1-8 paired, crossplay 1M, eval vs caller. About one hour per
+  lever, decisive at t > 2.4.
+
 ## Open now
 
 ### 1. Re-measure HU search after the flop-routing fix
@@ -73,7 +94,10 @@ best response to it. `slumbot_exploiter_ckpt.bin` is a partial run.
   the money is lost. If the exploiter underperforms, more logged hands is
   the first lever, not a bigger `--rnr-p`.
 
-### 4. Settle the 6-max modernization question, or drop it
+### 4. (Closed 25 Aug) Settle the 6-max modernization question, or drop it
+
+Moot: the pruning fix cut exploitability by 60% at 12 buckets and 200M,
+and the wide menu alone measured null. Kept for the record.
 
 The v2 result mixes three changes (OCHS, wide bets, 24 buckets) with a 5x
 dilution confound. Two ways to resolve it, in cost order:
@@ -152,6 +176,8 @@ Do not redo these without a new reason. Full write-ups in BASELINES.md.
 | More HU iterations (100M to 300M) + exact river buckets | Null vs Slumbot (-782 to -719, well inside the interval). |
 | 36 buckets at equal iterations (HU) | Worse (-1128). Granularity without visits does not pay. |
 | Equilibrium selection worry (6-max) | Does not materialize: all cross-play cells within +-80 mbb of zero. |
+| VR-MCCFR baselines (`--vr-baseline`) | Worse: +168 +-149 more exploitable, 8/8 seeds, 3.3x slower, 2x memory. Needs converged baselines; dilution starves it. |
+| Snapshot-averaged postflop blueprint (`--snapshot-avg`) | Worse: +430 +-140 more exploitable, 8/8 seeds. Needs a converged current strategy. |
 
 ## Measurement discipline
 
