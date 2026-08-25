@@ -73,10 +73,11 @@ enum Cmd {
         /// Postflop equity buckets per street.
         #[arg(long, default_value_t = 12)]
         buckets: u16,
-        /// Bet-size menu shape (stored in the blueprint): wide (2026-07
-        /// menu), pluribus (coarse postflop, Pluribus's shape), or
-        /// pluribus-fine-pre (also a fine preflop menu).
-        #[arg(long, value_enum, default_value_t = MenuShape::Wide)]
+        /// Bet-size menu shape (stored in the blueprint): pluribus (coarse
+        /// postflop, Pluribus's shape; the default, measured least
+        /// exploitable), wide (2026-07 menu), or pluribus-fine-pre (also a
+        /// fine preflop menu; worse at every budget tested).
+        #[arg(long, value_enum, default_value_t = MenuShape::Pluribus)]
         menu: MenuShape,
         /// Monte Carlo rollouts per river equity estimate.
         #[arg(long, default_value_t = 200)]

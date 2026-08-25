@@ -11,14 +11,15 @@ benchmark alive.
 
 ## Status (25 August 2026)
 
-**6-max.** `blueprint_pprune200.bin` (200M iterations, 12 buckets, Pluribus
-pruning rules) is the standing reference: BR exploitability lower bound
-**+188 mbb/hand** pooled over 8 seeds, +2742 vs a calling station with
-AIVAT. That is 60% below July's reference (+472) and came from one
-two-line fix to the pruning rule. Against the real Pluribus's 10,000
-logged hands the (older) blueprint picks Pluribus's action 66.8% of the
-time. There is no external 6-max opponent to play, so "how far behind
-Pluribus" is not a number we can currently produce.
+**6-max.** `blueprint_plu200.bin` (200M iterations, 12 buckets, Pluribus
+pruning rules, Pluribus coarse postflop menu) is the standing reference:
+heads-up-line BR bound **+116 mbb/hand** pooled over 8 seeds (July: +472),
++2914 vs a calling station with AIVAT. **Multiway LBR bound: +929 ±319**,
+unchanged by either fix and with only 0.1% of decisions on untrained
+infosets — trained, wrong multiway play. That is the target. Against the
+real Pluribus's 10,000 logged hands the (older) blueprint picks Pluribus's
+action 66.8% of the time. There is no external 6-max opponent to play, so
+"how far behind Pluribus" is not a number we can currently produce.
 
 **Heads-up 200bb.** The blueprint loses to Slumbot by -714.5 +-331.5
 mbb/hand (10k hands); search made it worse (-1771). The frontier
@@ -28,14 +29,17 @@ mbb/hand. Deprioritised below; see "Heads-up, kept alive".
 **Tooling.** A one-hour proof loop exists for trainer changes (below).
 131 tests. 86GB of gitignored artifacts.
 
-**Since 24 Aug.** Pluribus pruning rules are the default (BR +501 to +188
-at 200M, 8/8 seeds). `lbr --multiway` (A0) is built: LBR in one rotating
-seat vs the bot in every other seat, exact Bayes per seat, joint-equity
-valuation, deterministic per seed; first run on `blueprint_pprune200.bin`
-queued. `--menu wide|pluribus|pluribus-fine-pre` (A1 infrastructure) is
-stored in the blueprint and legacy blueprints load as Wide; the
-three-arm 30M test is queued. A2 (plain 470M at the pruned run's
-wall-clock) is in flight.
+**Since 24 Aug (A0, A1, A2 done).** Pluribus pruning rules are the
+default (BR +501 → +188 at 200M, 8/8 seeds; A2: plain with 1.4x the
+wall-clock still loses on 7/8). Pluribus's coarse postflop menu is the
+default (+188 → +116 at 200M, 7/8; neutral multiway; the fine preflop
+menu is worse at every budget). `lbr --multiway` (A0) exists and reports
+unseen-infoset fallback rates; its first readings reframed the project:
+the standing blueprint is near-unexploitable heads-up (+23) and gives up
++929 multiway, on trained infosets. Cross-play between different menus
+is an artefact and is now refused. Probes are bit-for-bit reproducible
+only single-threaded (parallel: ~1-3% of the bound; paired comparisons
+unaffected).
 
 ## Positioning: what "beat the best" means here
 
@@ -332,10 +336,9 @@ the bot is not embarrassing.
 ### Sequencing
 
 ```
-done     A0 probe built, A1 infra built
-running  A2 wall-clock -> A0 first bound -> A1 three-arm menu test
-next     B2 step 1 (RNR exploiter vs Slumbot), A5 audit items (cheap)
-weeks    A3 multiway search, gated by A0 --search   <- makes B2 safe
+done     A0 probe, A1 menu (adopted), A2 wall-clock check
+next     A3 multiway search, gated by A0 --search   <- the +929 lives here
+         B2 step 1 (RNR exploiter vs Slumbot), A5 audit items (cheap)
 then     B2 steps 2-3 (stats prior, per-seat arms), B1 net leaves,
          C2 Pluribus clone (parallel)
 then     B2 steps 4-5 (population + frozen profiler, GPU), A4 rented run

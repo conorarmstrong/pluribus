@@ -1152,7 +1152,11 @@ mod tests {
             sb: 50,
             bb: 100,
         };
-        let abs = Arc::new(abs_small());
+        // The 800-into-200 off-tree bet maps to the callable 400 size only on
+        // the wide menu; the test is about pricing, so pin that menu.
+        let mut cfg = abs_small().cfg.clone();
+        cfg.menu = crate::abstraction::MenuShape::Wide;
+        let abs = Arc::new(Abstraction::new(cfg));
         let policy = Policy::new(
             Blueprint {
                 strategies: Default::default(),

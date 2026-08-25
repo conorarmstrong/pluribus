@@ -78,7 +78,7 @@ impl Default for AbsConfig {
     fn default() -> Self {
         AbsConfig {
             postflop_buckets: 12,
-            menu: MenuShape::Wide,
+            menu: MenuShape::Pluribus,
             equity_rollouts: 200,
             dist_runouts: 24,
             runout_rollouts: 50,
@@ -1224,7 +1224,9 @@ mod tests {
     #[test]
     fn menus_are_wide() {
         use crate::engine::Street;
-        let a = abs();
+        let mut cfg = abs().cfg.clone();
+        cfg.menu = MenuShape::Wide;
+        let a = Abstraction::new(cfg);
         let n_bets = |acts: &[AbsAction]| {
             acts.iter()
                 .filter(|x| matches!(x, AbsAction::Bet(_)))

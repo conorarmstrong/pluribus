@@ -72,7 +72,7 @@ training exactly.
 | `--checkpoint <file>` | – | Write a resumable checkpoint every ~5% |
 | `--resume <file>` | – | Continue from a checkpoint (restores abstraction too) |
 | `--buckets` | 12 | Postflop card buckets per street |
-| `--menu` | wide | Bet-size menu shape, stored in the blueprint: `wide` (2026-07 menu, 6-7 postflop sizes), `pluribus` (Pluribus's coarse postflop: 50%/100%/all-in first-in, pot/all-in raise), `pluribus-fine-pre` (also a fine 7-size preflop menu) |
+| `--menu` | pluribus | Bet-size menu shape, stored in the blueprint: `pluribus` (Pluribus's coarse postflop: 50%/100%/all-in first-in, pot/all-in raise; the default, measured least exploitable), `wide` (2026-07 menu, 6-7 postflop sizes), `pluribus-fine-pre` (also a fine 7-size preflop menu; worse at every budget tested) |
 | `--rollouts` | 200 | MC rollouts per river equity estimate |
 | `--runouts` | 24 | Sampled future boards per flop/turn distribution |
 | `--kmeans-samples` | 30,000 | Situations sampled per street for clustering |
@@ -636,14 +636,23 @@ paired by deal, 1M-hand crossplay, AIVAT eval vs caller.
 | Lever | BR (plain +1755) | paired diff | speed | verdict |
 |-------|------------------|-------------|-------|---------|
 | Pluribus pruning rules (now default) | **+925** | **−830 ±139**, 8/8 seeds | same | **adopted** |
+| Pluribus coarse postflop menu (now default) | **+672** | **−303 ±100**, 8/8 seeds | 1.3× faster, 2.5× smaller | **adopted** |
+| Pluribus fine preflop menu (`--menu pluribus-fine-pre`) | +1282 | +308 worse, 8/8 | same | closed at this budget |
 | VR-MCCFR baselines (`--vr-baseline`) | +1923 | +168 ±149 worse, 8/8 | 3.3× slower | closed |
 | Snapshot blueprint (`--snapshot-avg`) | +2185 | +430 ±140 worse, 8/8 | 1.4× slower | closed |
 
-Confirmed at reference scale: at 200M iterations the same change takes the
-8-seed BR bound from **+501 to +188 mbb/hand** (paired −314 ±190, t=3.9,
-8/8 seeds). `blueprint_pprune200.bin` is now the least exploitable 6-max
-blueprint in the project, 60% below the July reference (+472) and 52%
-below the 400M OCHS/wide-bets v2 (+391). Two side findings: the wide bet
+Confirmed at reference scale: at 200M iterations the pruning change takes
+the 8-seed BR bound from **+501 to +188 mbb/hand** (paired −314 ±190,
+t=3.9, 8/8 seeds), and the coarse menu on top of it to **+116** (paired
+−71 ±52, t=3.2, 7/8), with a 3.2× smaller tree and half the training
+time. `blueprint_plu200.bin` is the standing 6-max blueprint: 75% below
+the July reference (+472) on the heads-up line.
+
+**The multiway caveat.** Every number above is a heads-up-line bound.
+`lbr --multiway` (built 25 Aug) puts the same standing blueprint at
+**+929 ±319 mbb/hand** in real multiway pots, with only 0.1% of decisions
+on untrained infosets: trained, wrong multiway play, unchanged by either
+fix. That is the open target (ROADMAP A3). Two side findings: the wide bet
 menu on its own does nothing (plain 200M wide-menu +501 vs narrow-menu
 +472), and Pluribus pruning costs 2.4× per iteration at 200M (67 vs 28
 min; 402M vs 306M infosets), so the equal-wall-clock comparison is still

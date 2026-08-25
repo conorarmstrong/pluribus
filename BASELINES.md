@@ -934,3 +934,40 @@ were true as of July and are not now; every paired comparison in this
 file remains valid because the variation (±10-60) is an order of
 magnitude inside the CIs (±300-500). Fix or isolate before any claim
 that depends on effects under ~100 mbb/hand.
+
+### A1c: coarse Pluribus menu at 200M — CONFIRMED, new 6-max standing (+116)
+
+`train --iters 200000000 --train-seed 0 --menu pluribus`: 2090.8s (35 min,
+95,657 iters/s), **124.1M infosets** (wide/pruned 200M: 402.1M, 67 min).
+
+| Seed | wide 200M (prev. default) | pluribus-menu 200M | improvement |
+|------|---------------------------|--------------------|-------------|
+| 1 | +183.9 | +38.9 | +145.0 |
+| 2 | +169.8 | +40.0 | +129.8 |
+| 3 | +103.4 | +132.3 | −28.9 |
+| 4 | +239.9 | +174.1 | +65.8 |
+| 5 | +211.8 | +80.1 | +131.7 |
+| 6 | +260.0 | +247.2 | +12.8 |
+| 7 | +133.3 | +98.9 | +34.4 |
+| 8 | +197.5 | +119.8 | +77.7 |
+| **mean** | **+187.5** | **+116.4** | **+71.0 ±52.3** (t=3.21, df=7, p≈0.015), 7/8 |
+
+Multiway `lbr --multiway` 20k seed 1: **+928.8 ±318.8** (wide 200M:
++934.1 ±332.6) — neutral, fallbacks 0.1%. Eval vs caller (AIVAT+dup,
+100k): +2913.5 ±258.5 (wide 200M: +2742.4 ±227.8).
+
+VERDICT: adopted as the default (`--menu wide` restores the 2026-07
+menu). The 6-max standing is now `blueprint_plu200.bin`: heads-up-line
+BR **+116**, multiway LBR **+929**, at a third of the tree and half the
+training time of the previous standing. Since 24 Aug the heads-up-line
+bound has gone +472 → +188 → +116 from two Pluribus-recipe corrections;
+the multiway bound (+929) has not moved and is the target from here
+(ROADMAP A3).
+
+| File | SHA-256 | Size (bytes) | Produced by |
+|------|---------|--------------|-------------|
+| blueprint_plu200.bin | `086b84958641cef6cb56396efa2c2ff8625d5f5a23f0010ba1fd9527ed2ba3ff` | 4,090,176,388 | `train --iters 200000000 --train-seed 0 --menu pluribus` (now the default) |
+
+Test note: `cfr::tests::push_fold_convergence` (32o fold > 0.6 at 80k
+iterations) failed once in a full-suite run under machine load and passes
+3/3 in isolation; a pre-existing threshold sensitivity, not the menu.
