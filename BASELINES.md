@@ -533,6 +533,16 @@ direction shows limited blueprint payoff so far.
 
 ## 2026-08-24 — Trainer levers, paired 8-seed loop: VR-MCCFR is a clear NEGATIVE
 
+- Code: commit `b342db6` (flags + default flip; the 30M/200M arms below
+  ran on the same source, built before the default flip, with the flag
+  set explicitly)
+- Toolchain/hardware: as the July records (rustc 1.90.0 `--release`,
+  16-core Apple Silicon, 128GB)
+- Tests at time of record: 128/128 passing
+- 30M-arm blueprints (bp_plain30/vr30/pprune30/snap30) were scratch
+  artifacts, probed and deleted; not hashed. The 200M arms are hashed
+  below.
+
 Research pass over 2024-26 CFR work (PDCFR+/dynamic discounting, correlated
 chance sampling, VR-MCCFR, neural/parallel CFR, the Pluribus supplement)
 picked three cheap, sampling-compatible levers to test as opt-in `train`
@@ -661,7 +671,7 @@ Same loop at the reference iteration count. Both arms `train --iters
 | Arm | train time | iters/s | infosets | strategies |
 |-----|-----------|---------|----------|------------|
 | plain (per-action pruning) | 1706s (28 min) | 117,218 | 306.1M | 232.6M |
-| pluribus-prune | 4013s (67 min) | 49,834 | 402.1M | — |
+| pluribus-prune | 4013s (67 min) | 49,834 | 402.1M | 304.2M |
 
 Speed caveat (new at this scale): with 2.4x the per-iteration cost the
 "no speed cost" seen at 30M does not hold at 200M — the exemptions add
