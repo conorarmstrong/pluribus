@@ -854,3 +854,11 @@ exploitable at equal iterations, 8/8 seeds. Fine preflop closed at this
 budget; it is the right shape only once preflop visits are plentiful
 (Pluribus's regime), and it should be revisited with the rented run
 (A4), not before. Crossplay, eval and multiway lines below.
+
+A1 tail (seed 1 unless noted): fine-pre seed 8 BR +1109.5 → 8-seed mean
++1281.9 (worse than wide on 8/8). Eval vs caller (AIVAT+dup, 100k):
+wide +2346.1 ±237.8, **pluribus +2942.4 ±276.0**, fine-pre +2183.6 ±242.4.
+Multiway LBR, 5k hands: wide +2506.2 ±935.5, pluribus +2362.9 ±973.5,
+fine-pre +4555.4 ±1265.8. At 5k the coarse menu's HU-line gain does not
+show multiway (CIs ±950); 20k runs follow in A0b. The 30M arms are all
+far more exploitable multiway than the 200M standing blueprint (+1380).
