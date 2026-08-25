@@ -896,3 +896,41 @@ Readings:
    confirmation (A1c) decide.
 4. The multiway probe is cheap (20-30s per 20k hands once the blueprint
    is loaded) and should run on 8 seeds as standard from now on.
+
+### A1m: paired 8-seed multiway probe, wide vs pluribus menu (30M arms) — NULL
+
+| Seed | wide | pluribus | pluribus − wide |
+|------|------|----------|-----------------|
+| 1 | +2171.6 | +2437.2 | +265.6 |
+| 2 | +2794.1 | +2465.8 | −328.3 |
+| 3 | +2731.4 | +2920.8 | +189.4 |
+| 4 | +2750.7 | +2581.2 | −169.5 |
+| 5 | +2820.9 | +2495.8 | −325.1 |
+| 6 | +2231.9 | +2386.1 | +154.2 |
+| 7 | +2078.3 | +2290.1 | +211.8 |
+| 8 | +2213.0 | +2013.4 | −199.6 |
+| **mean** | **+2474.0** | **+2448.8** | **−25.2 ±212.5** (t=−0.28) |
+
+The coarse menu is neutral multiway at 30M (4/8 seeds each way) while
+−303 ±100 better on the heads-up line (A1). Improves one probe, worsens
+neither: adoptable if A1c (200M) confirms. Multiway bounds at 30M are
+dilution-dominated (A0b) and would not be expected to separate the arms.
+
+### Probe reproducibility (found during A1m)
+
+Identical invocations, same blueprint (wide 30M), seed 1:
+`lbr --multiway` 5k: +2610.5 / +2537.6; 1k parallel +824.9 / +603.0;
+1k with RAYON_NUM_THREADS=1: +554.9 / +554.9 (identical).
+`lbr` HU-line 5k: +1332.3 / +1276.0. `br` 2k: +928.7 / +920.7.
+`eval --baseline caller` 20k: +2025.0 / +2025.0 (identical).
+
+So `br` and both `lbr` modes are reproducible only single-threaded; in
+parallel they vary by ~1-3% of the bound. The bucket cache values are
+deterministic by construction (key-seeded MC, collision-free packed keys)
+and `eval` shares that cache and does not vary, so the cause is on the
+LBR/BR path (range tracking / exact-solver code under rayon), not yet
+isolated. Consequence: the "bit-for-bit" claims in this file for `br`
+were true as of July and are not now; every paired comparison in this
+file remains valid because the variation (±10-60) is an order of
+magnitude inside the CIs (±300-500). Fix or isolate before any claim
+that depends on effects under ~100 mbb/hand.

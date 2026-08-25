@@ -548,7 +548,9 @@ impl Lbr<'_> {
 /// tracks each bot seat's range with exact Bayes updates on the shared
 /// public history. Reported in mbb/hand for the LBR seat: a lower bound on
 /// the policy's exploitability that, unlike `run_lbr`, sees multiway pots.
-/// Deterministic per seed.
+/// Bit-for-bit reproducible per seed when run single-threaded
+/// (RAYON_NUM_THREADS=1); parallel runs vary by ~1-3% of the bound
+/// (measured 2026-08-25, cause not yet isolated; `eval` does not vary).
 pub fn run_lbr_multiway(policy: &Policy, cfg: &HandConfig, hands: u64, runouts: u32, seed: u64) -> LbrResult {
     let n = cfg.num_players;
     let bb = cfg.bb as f64;

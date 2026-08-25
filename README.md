@@ -214,9 +214,12 @@ Bayes updates on the shared public history, values check/call by joint
 showdown equity against all live ranges, and values a bet by the product
 of the opponents' fold probabilities (each computed at the exact state it
 would face) plus joint equity against the continuing parts of their
-ranges. Deterministic per seed. This is the only probe in the project that
-sees a three-way pot; the default `lbr` and `br` are heads-up-line bounds,
-so quote both.
+ranges. This is the only probe in the project that sees a three-way pot;
+the default `lbr` and `br` are heads-up-line bounds, so quote both. Note on
+reproducibility: `br` and both `lbr` modes are bit-for-bit reproducible per
+seed only single-threaded (`RAYON_NUM_THREADS=1`); parallel runs vary by
+roughly 1-3% of the bound between identical invocations (`eval` does not).
+Paired-seed comparisons stay valid; the variation is far inside the CIs.
 
 ### `benchmark`
 Replays all 10,000 hands the real Pluribus played in the Science 2019
