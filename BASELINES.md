@@ -759,3 +759,45 @@ more seeds; the decision does not change either way.
 
 Eval vs caller (AIVAT+dup, 100k): plain 470M +2384.2 ±211.1 (plain 200M
 +2108.9; pruned 200M +2742.4). Same ordering as BR.
+
+## 2026-08-25 — A0: first multiway exploitability bound — the keyhole was hiding 1300 mbb/hand
+
+`lbr --multiway` (commit `f8b955f` era, `src/lbr.rs`): LBR in one rotating
+seat, the bot in every other seat, exact Bayes range per seat on the
+public history, calls valued by joint showdown equity vs all live ranges,
+bets by the product of responders' fold probabilities plus joint equity vs
+the continuing ranges. Deterministic per seed. Both probes below on
+`blueprint_pprune200.bin` (`198c7aa2…`), seed 1.
+
+| Probe | hands | LBR wins (mbb/hand) | time |
+|-------|-------|---------------------|------|
+| HU-line `lbr` (other seats fold) | 20,000 | +42.5 ±322.4 | 60s |
+| HU-line `lbr` | 5,000 | −10.2 ±666.4 | 17s |
+| **multiway `lbr --multiway`** | 5,000 | **+1380.4 ±714.3** | 12s |
+
+Reading: the blueprint that is statistically unexploitable on the
+heads-up line (every 6-max number in this file until today) gives up
+more than a big blind per hand once a best-responder plays it in real
+multiway pots. The two bounds are for different games (six live seats
+vs two, LBR rotating through all positions vs blinds only) and are not
+comparable as numbers; what is comparable is the claim "a best-responder
+who knows the policy wins X per hand at this table", and X is ~30x
+larger multiway. Every 6-max verdict recorded before this section was
+measured through the HU-line keyhole and must be re-read with that in
+mind; the pruning fix's multiway effect is not yet known (measured next,
+in the A1 run, one line per arm).
+
+Suspects, to be separated by instrumentation before anything is fixed:
+(a) unvisited multiway infosets — the bot's fallback on an unseen key is
+check/call, and multiway lines are the rarest in self-play, so part of
+this may be LBR farming a calling station that only exists off the
+trained tree; (b) genuinely wrong multiway frequencies — Pluribus notes
+that 6-max equilibria fold most hands early, and the blueprint's
+multiway continuation ranges have never been probed. Next: log the
+fallback rate per street during the multiway probe, and run 20k hands on
+8 seeds so the bound has a CI worth quoting.
+
+Operational note: the 13GB blueprint loads took 40 min to 3 h during this
+run instead of 3.5 min, from machine-wide memory pressure (compressor
+~48GB, a 28GB `node` process). Probe timings above are the runs
+themselves.
