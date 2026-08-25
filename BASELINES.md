@@ -756,3 +756,6 @@ roughly +100 is the smarter placement of those visits, the latter
 suggestive (p≈0.10) rather than proven. Practical reading: at any fixed
 wall-clock budget on this machine, pruned-N beats plain-2.35N. Not worth
 more seeds; the decision does not change either way.
+
+Eval vs caller (AIVAT+dup, 100k): plain 470M +2384.2 ±211.1 (plain 200M
++2108.9; pruned 200M +2742.4). Same ordering as BR.
