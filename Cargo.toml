@@ -3,7 +3,7 @@ name = "pluribus"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Pluribus-style 6-max no-limit hold'em bot: Linear MCCFR blueprint + optional online subgame resolving"
+description = "Pluribus-style 2-6 player no-limit hold'em bot (6-max primary): Linear MCCFR blueprint + online subgame resolving"
 
 [dependencies]
 rand = { version = "0.9", features = ["small_rng"] }

@@ -3,8 +3,10 @@
 Where the project stands, why it is behind Pluribus at 6-max, and the plan
 to get past it. Every claim here is backed by a run logged in
 [BASELINES.md](BASELINES.md); this file is the plan, that file is the
-evidence. Priority is 6-max: most money games have more than two players.
-Heads-up work continues only where it feeds 6-max or keeps the one external
+evidence. The bot plays 2 to 6 players with one blueprint; 6-max is the
+primary target because most money games have more than two players.
+Heads-up is the 2-player case of the same system, not a separate bot, and
+heads-up work continues only where it feeds 6-max or keeps the one external
 benchmark alive.
 
 ## Status (25 August 2026)

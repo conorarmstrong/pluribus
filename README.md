@@ -7,6 +7,12 @@ external-sampling **Linear MCCFR** (with Pluribus's negative-regret pruning)
 over an **EMD k-means card abstraction**, and sharpens play at the table with
 **range-tracked, depth-limited online subgame resolving**.
 
+The bot plays any table size from 2 to 6; one blueprint covers every seat.
+Six-max is the primary target because that is where most money games are
+played. Heads-up is the 2-player special case of the same engine, trainer
+and search stack, and it gets its own sections below only because it has
+the one external benchmark (Slumbot) that a 6-max bot currently lacks.
+
 This replaces an earlier Python implementation (preserved in `legacy/`),
 which was ~4 orders of magnitude slower and had a game-engine bug that made
 training impossible.
