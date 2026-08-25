@@ -61,6 +61,9 @@ pub struct AbsConfig {
     /// Number of postflop card buckets per street (k-means clusters on
     /// flop/turn, equity quantiles on the river).
     pub postflop_buckets: u16,
+    /// Bet-size menu shape. Stored with the blueprint, so play and probes
+    /// always use the menu the blueprint was trained with.
+    pub menu: MenuShape,
     /// Monte Carlo rollouts per river equity estimate.
     pub equity_rollouts: u32,
     /// Sampled future-board runouts per flop/turn distribution estimate.
@@ -75,12 +78,32 @@ impl Default for AbsConfig {
     fn default() -> Self {
         AbsConfig {
             postflop_buckets: 12,
+            menu: MenuShape::Wide,
             equity_rollouts: 200,
             dist_runouts: 24,
             runout_rollouts: 50,
             cache_cap: 30_000_000,
         }
     }
+}
+
+/// Bet-size menu shapes (indices into BET_SIZES = [25,33,50,75,100,150,200,300]).
+///
+/// - `Wide`: the 2026-07 menu — 4 preflop opens, 6-7 postflop first-in
+///   sizes from 25% through 200% overbets, 4-size raises, 2-size re-raises.
+///   Measured null vs the earlier narrow menu at 200M (BASELINES.md).
+/// - `Pluribus`: Pluribus's postflop shape (Science 2019 supplement): at
+///   most 50% / 100% / all-in for the first bet in a round, 100% / all-in
+///   for a raise, call / fold / all-in beyond that. Preflop as `Wide`.
+///   Search, not the blueprint, is meant to supply sizing at the table.
+/// - `PluribusFinePre`: `Pluribus` postflop plus a fine preflop menu
+///   (7 opens, 5 three-bet sizes, 3 four-bet sizes), because Pluribus
+///   never searches preflop and so made that round's abstraction fine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+pub enum MenuShape {
+    Wide,
+    Pluribus,
+    PluribusFinePre,
 }
 
 /// K-medians cluster centers, one set per street. Two feature families
@@ -360,17 +383,29 @@ impl Abstraction {
     /// menus span a small (25-33%) bet through overbets so the blueprint can
     /// represent modern sizing, with progressively pruned raise/re-raise menus
     /// to bound the tree.
-    pub fn bet_menu(street: Street, n_raises: u8) -> &'static [u8] {
-        match (street, n_raises) {
-            (Street::Preflop, 0) => &[1, 2, 3, 4],   // open: 4 sizes
-            (Street::Preflop, 1) => &[2, 4, 6],      // 3-bet: 50/100/200%
-            (Street::Preflop, 2) => &[4, 6],         // 4-bet: pot, overbet
-            (Street::Preflop, _) => &[],             // 5-bet+: call/fold/all-in
-            (Street::Flop, 0) => &[0, 1, 2, 3, 4, 5, 6],  // 25..200%
-            (_, 0) => &[1, 2, 3, 4, 5, 6],           // turn/river: 33..200%
-            (_, 1) => &[2, 3, 4, 6],                 // raise: 50/75/100/200%
-            (_, 2) => &[4, 6],                       // re-raise: pot, overbet
-            (_, _) => &[],
+    pub fn bet_menu(&self, street: Street, n_raises: u8) -> &'static [u8] {
+        match (self.cfg.menu, street, n_raises) {
+            // Preflop: Wide and Pluribus share the 2026-07 preflop menu.
+            (MenuShape::Wide | MenuShape::Pluribus, Street::Preflop, 0) => &[1, 2, 3, 4],
+            (MenuShape::Wide | MenuShape::Pluribus, Street::Preflop, 1) => &[2, 4, 6],
+            (MenuShape::Wide | MenuShape::Pluribus, Street::Preflop, 2) => &[4, 6],
+            (MenuShape::Wide | MenuShape::Pluribus, Street::Preflop, _) => &[],
+            // Fine preflop: 7 opens (1.6x..6x), 5 three-bets, 3 four-bets.
+            (MenuShape::PluribusFinePre, Street::Preflop, 0) => &[0, 1, 2, 3, 4, 5, 6],
+            (MenuShape::PluribusFinePre, Street::Preflop, 1) => &[1, 2, 3, 4, 6],
+            (MenuShape::PluribusFinePre, Street::Preflop, 2) => &[2, 4, 6],
+            (MenuShape::PluribusFinePre, Street::Preflop, _) => &[4],
+            // Wide postflop: 25..200% first-in, 4-size raises, 2-size re-raises.
+            (MenuShape::Wide, Street::Flop, 0) => &[0, 1, 2, 3, 4, 5, 6],
+            (MenuShape::Wide, _, 0) => &[1, 2, 3, 4, 5, 6],
+            (MenuShape::Wide, _, 1) => &[2, 3, 4, 6],
+            (MenuShape::Wide, _, 2) => &[4, 6],
+            (MenuShape::Wide, _, _) => &[],
+            // Pluribus postflop: 50%/100% (+ all-in) first-in, pot (+ all-in)
+            // raise, call/fold/all-in beyond.
+            (_, _, 0) => &[2, 4],
+            (_, _, 1) => &[4],
+            (_, _, _) => &[],
         }
     }
 
@@ -393,7 +428,7 @@ impl Abstraction {
 
         if let Some((lo, hi)) = h.raise_bounds() {
             let mut seen: Vec<u32> = Vec::with_capacity(4);
-            for &i in Self::bet_menu(h.street(), h.n_raises()) {
+            for &i in self.bet_menu(h.street(), h.n_raises()) {
                 let t = Self::bet_target(h, i).clamp(lo, hi);
                 if t < hi && !seen.contains(&t) {
                     seen.push(t);
@@ -1146,6 +1181,47 @@ mod tests {
     /// sizes postflop spanning a small bet through overbets on flop AND
     /// turn/river.
     #[test]
+    fn pluribus_menus_are_coarse_postflop_and_fine_preflop_is_finer() {
+        let mk = |menu| {
+            Abstraction::new(AbsConfig {
+                menu,
+                cache_cap: 1000,
+                ..AbsConfig::default()
+            })
+        };
+        let wide = mk(MenuShape::Wide);
+        let plu = mk(MenuShape::Pluribus);
+        let fine = mk(MenuShape::PluribusFinePre);
+        let bets = |a: &Abstraction, h: &Hand| {
+            a.abstract_actions(h)
+                .iter()
+                .filter(|x| matches!(x, AbsAction::Bet(_)))
+                .count()
+        };
+        let cfg = HandConfig::default();
+        // Flop first-in: UTG open-limps around to a checked flop.
+        let mut h = Hand::new(&cfg, 0, crate::cards::fresh_deck());
+        for _ in 0..cfg.num_players {
+            h.apply(PlayerAction::CheckCall);
+        }
+        assert_eq!(h.street(), Street::Flop);
+        assert_eq!(bets(&plu, &h), 2, "Pluribus flop first-in: 50% and 100%");
+        assert_eq!(bets(&fine, &h), 2);
+        assert!(bets(&wide, &h) >= 5);
+        // Facing a flop bet: one raise size under Pluribus, none after that.
+        let mut h2 = h.clone();
+        h2.apply(plu.concrete(&h2, AbsAction::Bet(4)));
+        assert_eq!(bets(&plu, &h2), 1, "Pluribus raise: pot only");
+        let mut h3 = h2.clone();
+        h3.apply(plu.concrete(&h3, AbsAction::Bet(4)));
+        assert_eq!(bets(&plu, &h3), 0, "Pluribus re-raise: call/fold/all-in");
+        // Preflop open: fine menu strictly more sizes than the shared one.
+        let root = Hand::new(&cfg, 0, crate::cards::fresh_deck());
+        assert!(bets(&fine, &root) > bets(&plu, &root));
+        assert_eq!(bets(&plu, &root), bets(&wide, &root));
+    }
+
+    #[test]
     fn menus_are_wide() {
         use crate::engine::Street;
         let a = abs();
@@ -1536,6 +1612,7 @@ mod tests {
             dist_runouts: 8,
             runout_rollouts: 20,
             cache_cap: 500_000,
+            menu: crate::abstraction::MenuShape::Wide,
         }));
         let cfg = crate::cfr::TrainConfig {
             hand: HandConfig {

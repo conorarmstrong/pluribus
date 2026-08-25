@@ -31,6 +31,7 @@ use abstraction::{AbsConfig, Abstraction, Centroids};
 use bot::{Policy, SearchParams};
 use cfr::{Blueprint, TrainConfig, Trainer};
 use clap::{Parser, Subcommand};
+use abstraction::MenuShape;
 use engine::HandConfig;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
@@ -72,6 +73,11 @@ enum Cmd {
         /// Postflop equity buckets per street.
         #[arg(long, default_value_t = 12)]
         buckets: u16,
+        /// Bet-size menu shape (stored in the blueprint): wide (2026-07
+        /// menu), pluribus (coarse postflop, Pluribus's shape), or
+        /// pluribus-fine-pre (also a fine preflop menu).
+        #[arg(long, value_enum, default_value_t = MenuShape::Wide)]
+        menu: MenuShape,
         /// Monte Carlo rollouts per river equity estimate.
         #[arg(long, default_value_t = 200)]
         rollouts: u32,
@@ -417,6 +423,7 @@ fn main() {
             resume,
             checkpoint,
             buckets,
+            menu,
             rollouts,
             runouts,
             kmeans_samples,
@@ -441,6 +448,7 @@ fn main() {
             }
             let abs_cfg = AbsConfig {
                 postflop_buckets: buckets,
+                menu,
                 equity_rollouts: rollouts,
                 dist_runouts: runouts,
                 ..AbsConfig::default()
@@ -534,8 +542,8 @@ fn main() {
             .with_vr(vr_baseline);
 
             println!(
-                "training {players}-max, {iters} iterations, pruning {}, vr baselines {}, \
-                 snapshot avg {}",
+                "training {players}-max, {iters} iterations, menu {menu:?}, pruning {}, \
+                 vr baselines {}, snapshot avg {}",
                 if no_prune { "off" } else if per_action_prune { "per-action" } else { "pluribus" },
                 if vr_baseline { "on" } else { "off" },
                 if snapshot_avg { "on" } else { "off" }
@@ -1169,10 +1177,11 @@ fn load_policy_strat(path: &str, strat_prev: Option<&str>) -> Policy {
     });
     let strategic = bp.centroids.as_ref().is_some_and(|c| c.is_strategic());
     println!(
-        "loaded blueprint: {} infosets from {} iterations ({} card buckets, {})",
+        "loaded blueprint: {} infosets from {} iterations ({} card buckets, {:?} menu, {})",
         bp.strategies.len(),
         bp.iterations,
         bp.abs_cfg.postflop_buckets,
+        bp.abs_cfg.menu,
         if strategic {
             "STRATEGIC clustering"
         } else if bp.centroids.is_some() {

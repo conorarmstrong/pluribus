@@ -258,6 +258,7 @@ mod tests {
             dist_runouts: 8,
             runout_rollouts: 20,
             cache_cap: 500_000,
+            menu: crate::abstraction::MenuShape::Wide,
         };
         let cents = Centroids::train(&abs_cfg, 300, 5);
         let abs = Arc::new(Abstraction::with_centroids(abs_cfg, Some(cents)));

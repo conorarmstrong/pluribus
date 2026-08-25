@@ -66,6 +66,7 @@ training exactly.
 | `--checkpoint <file>` | – | Write a resumable checkpoint every ~5% |
 | `--resume <file>` | – | Continue from a checkpoint (restores abstraction too) |
 | `--buckets` | 12 | Postflop card buckets per street |
+| `--menu` | wide | Bet-size menu shape, stored in the blueprint: `wide` (2026-07 menu, 6-7 postflop sizes), `pluribus` (Pluribus's coarse postflop: 50%/100%/all-in first-in, pot/all-in raise), `pluribus-fine-pre` (also a fine 7-size preflop menu) |
 | `--rollouts` | 200 | MC rollouts per river equity estimate |
 | `--runouts` | 24 | Sampled future boards per flop/turn distribution |
 | `--kmeans-samples` | 30,000 | Situations sampled per street for clustering |

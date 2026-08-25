@@ -610,6 +610,7 @@ mod tests {
             dist_runouts: 6,
             runout_rollouts: 15,
             cache_cap: 100_000,
+            menu: crate::abstraction::MenuShape::Wide,
         });
         let cfg = HandConfig {
             num_players: 2,

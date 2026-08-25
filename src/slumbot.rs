@@ -636,6 +636,7 @@ mod tests {
                 dist_runouts: 8,
                 runout_rollouts: 20,
                 cache_cap: 200_000,
+                menu: crate::abstraction::MenuShape::Wide,
             })),
         )
     }

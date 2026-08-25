@@ -686,6 +686,25 @@ impl Trainer {
     }
 }
 
+/// On-disk layout of blueprints written before `AbsConfig::menu`.
+#[derive(Deserialize)]
+struct LegacyAbsConfig {
+    postflop_buckets: u16,
+    equity_rollouts: u32,
+    dist_runouts: u32,
+    runout_rollouts: u32,
+    cache_cap: usize,
+}
+
+#[derive(Deserialize)]
+struct LegacyBlueprint {
+    strategies: StrategyMap,
+    iterations: u64,
+    num_players: usize,
+    abs_cfg: LegacyAbsConfig,
+    centroids: Option<Centroids>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
     iterations: u64,
@@ -778,7 +797,30 @@ impl Blueprint {
 
     pub fn load(path: &str) -> std::io::Result<Blueprint> {
         let f = std::io::BufReader::new(std::fs::File::open(path)?);
-        bincode::deserialize_from(f).map_err(std::io::Error::other)
+        match bincode::deserialize_from(f) {
+            Ok(bp) => Ok(bp),
+            Err(e) => {
+                // Blueprints written before AbsConfig::menu existed (all
+                // 2026-07/08 artifacts) were trained with the Wide menu.
+                let f = std::io::BufReader::new(std::fs::File::open(path)?);
+                let legacy: LegacyBlueprint =
+                    bincode::deserialize_from(f).map_err(|_| std::io::Error::other(e))?;
+                Ok(Blueprint {
+                    strategies: legacy.strategies,
+                    iterations: legacy.iterations,
+                    num_players: legacy.num_players,
+                    abs_cfg: AbsConfig {
+                        postflop_buckets: legacy.abs_cfg.postflop_buckets,
+                        menu: crate::abstraction::MenuShape::Wide,
+                        equity_rollouts: legacy.abs_cfg.equity_rollouts,
+                        dist_runouts: legacy.abs_cfg.dist_runouts,
+                        runout_rollouts: legacy.abs_cfg.runout_rollouts,
+                        cache_cap: legacy.abs_cfg.cache_cap,
+                    },
+                    centroids: legacy.centroids,
+                })
+            }
+        }
     }
 }
 
@@ -799,6 +841,7 @@ mod tests {
             dist_runouts: 12,
             runout_rollouts: 25,
             cache_cap: 1_000_000,
+            menu: crate::abstraction::MenuShape::Wide,
         };
         let cents = Centroids::train(&abs_cfg, 400, 99);
         let abs = Abstraction::with_centroids(abs_cfg, Some(cents));
