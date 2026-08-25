@@ -801,3 +801,46 @@ Operational note: the 13GB blueprint loads took 40 min to 3 h during this
 run instead of 3.5 min, from machine-wide memory pressure (compressor
 ~48GB, a 28GB `node` process). Probe timings above are the runs
 themselves.
+
+## 2026-08-25 — A1: Pluribus-shaped bet menu — coarse postflop WINS, fine preflop LOSES
+
+ROADMAP A1. `--menu` stored in the blueprint (commit `f8b955f`). Three
+arms, `train --iters 30000000 --train-seed 0`, everything else default
+(Pluribus pruning). Paired BR seeds 1-8.
+
+| Arm | menu | train | infosets |
+|-----|------|-------|----------|
+| wide | 4 preflop opens; 6-7 postflop first-in sizes (25-200%), 4-size raise, 2-size re-raise | 177s, 169k it/s | 166.7M |
+| pluribus | preflop as wide; postflop 50%/100%/all-in first-in, pot/all-in raise, call/fold/all-in beyond | 137s, 220k it/s | **67.3M** |
+| pluribus-fine-pre | as pluribus + 7 opens / 5 three-bets / 3 four-bets preflop | 193s, 155k it/s | 171.3M |
+
+| Seed | wide | pluribus | fine-pre | wide − pluribus |
+|------|------|----------|----------|-----------------|
+| 1 | +1312.5 | +827.1 | +1101.5 | +485.4 |
+| 2 | +682.1 | +320.9 | +1521.6 | +361.2 |
+| 3 | +1082.3 | +675.0 | +1325.4 | +407.3 |
+| 4 | +719.2 | +533.4 | +898.3 | +185.8 |
+| 5 | +972.9 | +737.0 | +1198.8 | +235.9 |
+| 6 | +1044.6 | +903.5 | +1795.2 | +141.1 |
+| 7 | +901.8 | +538.6 | +1307.3 | +363.2 |
+| 8 | +1078.7 | +838.4 | (below) | +240.3 |
+| **mean** | **+974.3** | **+671.7** | **+1306.9** (7) | **+302.5 ±99.7** (t=7.18, df=7, p<1e-4) |
+
+Fine-pre vs wide, 7 seeds: +347.5 ±332.2 worse (t=2.56). The fine
+preflop menu adds 104M infosets on its own (preflop sequences across six
+seats grow combinatorially) and at 30M iterations those visits are not
+there; it gives back more than the coarse postflop menu gained.
+
+Training-run noise, measured for the first time: today's `wide` arm is
+the same configuration as yesterday's `pluribus-prune` 30M arm (BR
++924.6). Paired by seed: +49.7 ±165.6 (t=0.71). So two trainings of one
+config differ by ~±165 at 8 seeds; the paired design removes deal noise
+but not this. Effects under ~150 mbb/hand at 30M need a replication
+before they count. Nothing adopted so far is that small.
+
+VERDICT: coarse Pluribus postflop menu adopted pending the 200M
+confirmation (queued): 2.5x smaller tree, 30% faster, 31% less
+exploitable at equal iterations, 8/8 seeds. Fine preflop closed at this
+budget; it is the right shape only once preflop visits are plentiful
+(Pluribus's regime), and it should be revisited with the rented run
+(A4), not before. Crossplay, eval and multiway lines below.
