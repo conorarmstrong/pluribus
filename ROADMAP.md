@@ -83,12 +83,30 @@ Adopt only what wins at 30M and confirms at 200M. Record nulls.
 
 ### Phase A: match Pluribus
 
+**A0. A multiway exploitability probe.** *Days. Before A3, not after.*
+The `br` and `lbr` probes play heads-up blind-vs-blind inside the 6-max
+game (the other seats fold). Every 6-max exploitability number in
+BASELINES.md, including the +188, is therefore a heads-up-line number:
+a three-way pot has never been probed. That is a keyhole, and A3 would
+widen the part of the bot the keyhole cannot see. Build `lbr --multiway`
+first: one best-responding seat with exact Bayes tracking of five fixed
+blueprint seats, greedy LBR action selection (an exact multiway turn/
+river best response is a later upgrade), rotating the responder through
+all six seats, AIVAT-scored. Report it alongside the HU-line probe from
+then on; adopt nothing that improves one and worsens the other.
+Gate for the probe itself: crushes a table of callers by four figures,
+reproduces bit-for-bit per seed, and returns a bound at or above the
+HU-line bound on the same blueprint (it sees strictly more).
+
 **A1. Pluribus-shaped bet menu.** *Days.*
 Fine preflop, coarse postflop. `bet_menu` in `src/abstraction.rs`:
 preflop opens to something like 2x/2.5x/3x/4x/pot/all-in plus 3-bet and
 4-bet ladders; flop/turn/river first-in to 50% / 100% / all-in, re-raises
-to 100% / all-in. Prediction: 2-4x fewer infosets at equal iterations, so
-2-4x the visits, so BR falls again. Both the trainer and the shadow-hand
+to 100% / all-in. Prediction, and it is only a prediction: fewer infosets
+at equal iterations, so more visits, so BR falls again. A fine preflop
+menu across six seats grows preflop sequences combinatorially, so the
+net tree size after coarsening postflop could go either way; the first
+30M run answers that before anything else. Both the trainer and the shadow-hand
 mapping (`map_raise`) consume the menu, and every existing blueprint
 becomes unloadable by the new binary (the stale-menu guard); that is
 already true of July's blueprints, so the cost is one retrain.
@@ -130,12 +148,15 @@ the Pluribus design:
   seconds per hand on 28 cores.
 Measurement: `eval --search-gain` is the paired harness (hero searching
 vs hero on blueprint, everyone else blueprint). Extend it with a
-`--min-live 3` filter so the multiway contribution is isolated. Then BR
-against the searching bot, which does not exist yet: the probe currently
-measures the raw blueprint only. Add `br --search`. Without it, search
-improvements are unverifiable in the metric that matters.
-Gate: search-gain > 0 at 40k paired deals with CI clear of zero, and
-`br --search` at or below the blueprint's bound on 8 seeds.
+`--min-live 3` filter so the multiway contribution is isolated. It is a
+self-play number and self-play is blind to belief mismatch (the HU
+lesson), so it is necessary, not sufficient. The sufficient instrument is
+A0's multiway probe run against the *searching* bot: add `--search` to
+both probes so the responder faces the bot as it actually plays, not the
+raw blueprint.
+Gate: search-gain > 0 at 40k paired deals with CI clear of zero, and both
+probes with `--search` at or below their blueprint-only bounds on 8
+seeds.
 
 **A4. Bucket scaling at fixed visits.** *Needs A1 and a rented box.*
 With A1 and the pruning fix the tree shrinks enough that 50 buckets at
@@ -202,11 +223,15 @@ evidence.
 ### Phase C: a benchmark, without which none of this is a claim
 
 The heads-up world has Slumbot and the GTO Wizard API. 6-max has nothing
-public. Options in cost order; do the first two regardless.
+public, and Pluribus itself cannot be played. "Better than Pluribus" will
+therefore always be an indirect claim, and the honest form of it is:
+the same design at comparable scale, lower internal bounds on both the
+HU-line and multiway probes, and at least one external result. Nothing
+in this file produces a single number that settles it. Options in cost
+order; do the first two regardless.
 
-**C1. `br --search` and multiway search-gain.** Internal, covered in A3.
-Necessary, not sufficient: the probe is a lower bound against our own
-abstraction.
+**C1. Both probes with `--search`.** Internal, covered in A0 and A3.
+Necessary, not sufficient: lower bounds against our own abstraction.
 
 **C2. Pluribus behavioural clone from the logged hands.** *Days.*
 `clone` already builds a Blueprint-format model from logged hands with
@@ -231,16 +256,22 @@ the bot is not embarrassing.
 ### Sequencing
 
 ```
-now      A1 menu -> A2 wall-clock -> A5 audit items (interleaved, cheap)
-weeks    A3 multiway search + br --search   <- the centre of gravity
+now      A0 multiway probe -> A1 menu -> A2 wall-clock -> A5 audit (cheap)
+weeks    A3 multiway search, gated by A0 --search   <- the centre of gravity
 then     B1 net leaves, C2 Pluribus clone (parallel)
 then     A4 rented 200-bucket run (final recipe only)
 then     B2 exploitation track, C3 public API
 2027     B3 neural blueprint, C4 humans
 ```
 
-A1 and A2 can run this week on this machine. A3 is the item that decides
-whether we are building a Pluribus or a blueprint with a nice probe.
+A0, A1 and A2 can run this week on this machine. A3 is the item that
+decides whether we are building a Pluribus or a blueprint with a nice
+probe. One ordering tension to be explicit about: the goal is money games
+with weak players, which is B2, and B2 sits behind A3. The reason is that
+exploitation on top of a search stack that collapses under off-tree play
+is fragile; the HU search regression was exactly that failure. B2's first
+data point (the RNR exploiter vs Slumbot, under "kept alive") is cheap
+and does not wait.
 
 ## Heads-up, kept alive
 
@@ -289,6 +320,9 @@ Learned the hard way, twice each:
 - **Small live samples do not decide.** A 2,000-hand Slumbot result carries
   a +-900 mbb interval. The -234 that appeared to clear a gate came back
   -1771 at 10k.
+- **The probes are heads-up-line probes.** Until A0 exists, no 6-max
+  exploitability number in this repo has seen a multiway pot. Say so
+  whenever quoting one.
 - **Cross-play does not see exploitability.** Every cross-play in the repo
   has been a wash, including between blueprints whose BR bounds differ by
   2x. Use it as a sanity check, never as the gate.
