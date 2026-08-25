@@ -862,3 +862,37 @@ Multiway LBR, 5k hands: wide +2506.2 ±935.5, pluribus +2362.9 ±973.5,
 fine-pre +4555.4 ±1265.8. At 5k the coarse menu's HU-line gain does not
 show multiway (CIs ±950); 20k runs follow in A0b. The 30M arms are all
 far more exploitable multiway than the 200M standing blueprint (+1380).
+
+### A0b: 20k multiway bounds with the unseen-infoset fallback split
+
+`lbr` now reports how many blueprint lookups fell back to check/call on
+an infoset the blueprint never stored (commit `999239a`). Seed 1, 20k
+hands each.
+
+| Blueprint | HU-line LBR | fallback (river) | multiway LBR | fallback (turn / river) |
+|-----------|-------------|------------------|--------------|-------------------------|
+| wide 30M | +774.9 ±467.9 | 0.2% (10.7%) | +2102.7 ±482.4 | 1.8% (22.5% / 60.9%) |
+| pluribus-menu 30M | +355.7 ±443.9 | 0.1% (2.3%) | +2405.9 ±490.6 | 1.3% (12.1% / 31.9%) |
+| fine-pre 30M | +589.8 ±544.7 | 0.1% (5.0%) | +3663.6 ±623.8 | 3.5% (36.3% / 69.0%) |
+| **blueprint_pprune200 (200M)** | **+23.1 ±322.1** | 0.0% (0.2%) | **+934.1 ±332.6** | **0.2% (1.8% / 5.8%)** |
+
+Readings:
+1. At 200M the multiway leak is NOT coverage. The standing blueprint
+   falls back on 0.2% of multiway decisions and still gives up +934
+   mbb/hand to a best-responder in multiway pots, against +23 (zero
+   within CI) on the heads-up line. That is trained, wrong multiway
+   play: the fix is A3 (search on every postflop decision) and the
+   abstraction/compute axis, not more visits to the same tree.
+2. At 30M, coverage is a large part of it: 30M blueprints reach
+   multiway rivers on untrained lines 32-69% of the time and play a
+   calling station there. 30M-scale multiway numbers are therefore
+   dominated by dilution and should not be used to rank multiway play.
+3. The coarse Pluribus menu's HU-line gain (+775 → +356 here; −303 ±100
+   over 8 seeds in A1) does not appear multiway at 30M (+2103 vs +2406,
+   same seed, unpaired CIs ±490) despite halving the river fallback
+   rate. Per the roadmap rule (adopt nothing that improves one probe and
+   worsens the other) the coarse menu is NOT adopted on this evidence;
+   paired 8-seed multiway probes on both arms (A1m) and the 200M
+   confirmation (A1c) decide.
+4. The multiway probe is cheap (20-30s per 20k hands once the blueprint
+   is loaded) and should run on 8 seeds as standard from now on.
