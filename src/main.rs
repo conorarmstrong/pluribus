@@ -234,6 +234,11 @@ enum Cmd {
         blueprint: String,
         #[arg(long, default_value_t = 20_000)]
         hands: u64,
+        /// Multiway probe: LBR in one rotating seat against the bot in
+        /// every other seat (pots go multiway); the default probe is
+        /// heads-up blind-vs-blind with the other seats folding.
+        #[arg(long)]
+        multiway: bool,
         /// Board completions sampled per equity estimate.
         #[arg(long, default_value_t = 100)]
         runouts: u32,
@@ -713,6 +718,7 @@ fn main() {
         Cmd::Lbr {
             blueprint,
             hands,
+            multiway,
             runouts,
             strat_prev,
             seed,
@@ -723,11 +729,16 @@ fn main() {
                 ..HandConfig::default()
             };
             println!(
-                "LBR probe: {hands} hands blind-vs-blind ({}-max game, {runouts} runouts)...",
+                "LBR probe: {hands} hands {} ({}-max game, {runouts} runouts)...",
+                if multiway { "multiway, LBR seat rotating" } else { "blind-vs-blind" },
                 cfg.num_players
             );
             let started = std::time::Instant::now();
-            let r = lbr::run_lbr(&policy, &cfg, hands, runouts, seed);
+            let r = if multiway {
+                lbr::run_lbr_multiway(&policy, &cfg, hands, runouts, seed)
+            } else {
+                lbr::run_lbr(&policy, &cfg, hands, runouts, seed)
+            };
             println!(
                 "LBR wins {:+.1} mbb/hand (95% CI ±{:.1}) over {} hands in {:.1}s",
                 r.mbb_per_hand,

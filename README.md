@@ -201,6 +201,16 @@ LBR's winnings in mbb/hand: 0 = unexploited by this probe. `--runouts`
 (default 100) sets board completions sampled per equity estimate;
 `--strat-prev` is the same strategic-abstraction lookup as above.
 
+`--multiway` puts LBR in one rotating seat against the bot in *every*
+other seat, so pots go multiway. It tracks each bot seat's range with exact
+Bayes updates on the shared public history, values check/call by joint
+showdown equity against all live ranges, and values a bet by the product
+of the opponents' fold probabilities (each computed at the exact state it
+would face) plus joint equity against the continuing parts of their
+ranges. Deterministic per seed. This is the only probe in the project that
+sees a three-way pot; the default `lbr` and `br` are heads-up-line bounds,
+so quote both.
+
 ### `benchmark`
 Replays all 10,000 hands the real Pluribus played in the Science 2019
 experiment (`data/pluribus`, PHH format from
