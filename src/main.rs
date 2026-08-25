@@ -755,6 +755,9 @@ fn main() {
                 started.elapsed().as_secs_f64()
             );
             println!("(lower bound on the blueprint's exploitability; 0 = unexploited)");
+            if let Some(r) = bot::fallback_report() {
+                println!("{r}");
+            }
         }
 
         Cmd::Br {

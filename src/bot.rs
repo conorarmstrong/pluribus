@@ -23,6 +23,38 @@ use std::sync::Arc;
 /// with a different bet abstraction than this binary uses, so play silently
 /// falls back to check/call and is badly degraded — surfaced loudly once.
 static MENU_MISMATCHES: AtomicU64 = AtomicU64::new(0);
+/// Blueprint lookups and unseen-infoset fallbacks (to check/call), per
+/// street. Diagnostic for the probes: how much of a bound is a
+/// best-responder farming spots the blueprint never visited.
+static LOOKUPS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static FALLBACKS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+/// (lookups, unseen fallbacks) per street since process start.
+pub fn fallback_stats() -> [(u64, u64); 4] {
+    std::array::from_fn(|i| (LOOKUPS[i].load(Ordering::Relaxed), FALLBACKS[i].load(Ordering::Relaxed)))
+}
+
+/// Human-readable fallback summary, or None if nothing was looked up.
+pub fn fallback_report() -> Option<String> {
+    let st = fallback_stats();
+    let total: u64 = st.iter().map(|x| x.0).sum();
+    if total == 0 {
+        return None;
+    }
+    let names = ["preflop", "flop", "turn", "river"];
+    let parts: Vec<String> = st
+        .iter()
+        .zip(names)
+        .filter(|(x, _)| x.0 > 0)
+        .map(|(&(l, f), n)| format!("{n} {f}/{l} ({:.1}%)", 100.0 * f as f64 / l as f64))
+        .collect();
+    let f: u64 = st.iter().map(|x| x.1).sum();
+    Some(format!(
+        "unseen-infoset fallbacks to check/call: {f}/{total} ({:.1}%): {}",
+        100.0 * f as f64 / total as f64,
+        parts.join(", ")
+    ))
+}
 static MENU_MISMATCH_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// How many stale-menu blueprint lookups have been seen this process.
@@ -159,6 +191,8 @@ impl Policy {
         let p = h.to_act();
         let acts = self.abs.abstract_actions(h);
         let bucket = self.abs.bucket(h.hole(p), h.board(), rng);
+        let street = h.street() as usize;
+        LOOKUPS[street].fetch_add(1, Ordering::Relaxed);
         if let Some(s) = self.blueprint.get(bucket, hist) {
             if s.len() == acts.len() {
                 let probs: Vec<f64> = s.iter().map(|&x| x as f64).collect();
@@ -173,6 +207,7 @@ impl Policy {
                 note_menu_mismatch(s.len(), acts.len());
             }
         }
+        FALLBACKS[street].fetch_add(1, Ordering::Relaxed);
         let mut probs = vec![0.0; acts.len()];
         let call = acts
             .iter()
