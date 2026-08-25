@@ -838,6 +838,16 @@ config differ by ~±165 at 8 seeds; the paired design removes deal noise
 but not this. Effects under ~150 mbb/hand at 30M need a replication
 before they count. Nothing adopted so far is that small.
 
+Cross-play between the arms is INVALID and is not reported as a
+measurement: `run_crossplay` shares one action history that each policy
+tokenises with its own menu, so a bet size the other menu lacks throws
+that policy off-tree (check/call fallback) for the rest of the hand.
+Observed: pluribus focal vs wide −117.0 ±125.3 / reverse −47.5 ±124.9;
+fine-pre focal vs wide −908.2 ±153.7 / reverse −1334.5 ±184.1 — both
+directions losing is the artefact's signature. `crossplay` now refuses
+mismatched menus. Every earlier cross-play in this file compared
+same-menu blueprints and stands.
+
 VERDICT: coarse Pluribus postflop menu adopted pending the 200M
 confirmation (queued): 2.5x smaller tree, 30% faster, 31% less
 exploitable at equal iterations, 8/8 seeds. Fine preflop closed at this

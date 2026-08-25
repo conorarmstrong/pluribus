@@ -963,6 +963,16 @@ fn main() {
             if focal_p.blueprint.num_players != field_p.blueprint.num_players {
                 die("blueprints trained for different table sizes");
             }
+            if focal_p.blueprint.abs_cfg.menu != field_p.blueprint.abs_cfg.menu {
+                // One shared action history is tokenised by whichever policy
+                // acts; a bet size the other menu lacks puts that policy
+                // off-tree for the rest of the hand (check/call fallback).
+                // Measured 2026-08-25: -908/-1334 in BOTH directions.
+                die(&format!(
+                    "cross-play needs matching bet menus: focal {:?}, field {:?}",
+                    focal_p.blueprint.abs_cfg.menu, field_p.blueprint.abs_cfg.menu
+                ));
+            }
             let cfg = HandConfig {
                 num_players: focal_p.blueprint.num_players,
                 ..HandConfig::default()
@@ -973,6 +983,9 @@ fn main() {
                 "focal winrate: {:+.1} mbb/hand (95% CI ±{:.1}) over {} hands",
                 r.mbb_per_hand, r.ci95, r.hands
             );
+            if let Some(r) = bot::fallback_report() {
+                println!("{r}");
+            }
         }
 
         Cmd::Slumbot {
