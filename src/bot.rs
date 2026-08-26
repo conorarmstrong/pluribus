@@ -9,7 +9,7 @@
 //! CFR+ solver in `river.rs`; everything else solves to the end of the hand
 //! with MCCFR.
 
-use crate::abstraction::{AbsAction, Abstraction};
+use crate::abstraction::{AbsAction, AbsConfig, Abstraction};
 use crate::cfr::{sample_index, Blueprint, LeafCfg, Spine, TrainConfig, Trainer};
 use crate::engine::{Hand, Street};
 use crate::search::RangeTracker;
@@ -92,6 +92,11 @@ pub struct Policy {
     pub abs: Arc<Abstraction>,
     /// Belief-state value net: enables ReBeL-style flop solving.
     pub value_net: Option<Arc<ValueNet>>,
+    /// Finer card abstraction for the MCCFR subgame solver's own infosets
+    /// (Pluribus: lossless on the current street). None = the
+    /// blueprint's. Blueprint lookups (leaf rollouts, fallbacks) always
+    /// use `abs`.
+    pub search_abs: Option<Arc<Abstraction>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,7 +176,22 @@ impl Policy {
             blueprint: Arc::new(blueprint),
             abs,
             value_net: None,
+            search_abs: None,
         }
+    }
+
+    /// Solve multiway subgames over `buckets` postflop card buckets
+    /// (equity quantiles; exact per-board on the river) instead of the
+    /// blueprint's.
+    pub fn with_search_buckets(mut self, buckets: Option<u16>) -> Self {
+        self.search_abs = buckets.map(|b| {
+            Arc::new(Abstraction::new(AbsConfig {
+                postflop_buckets: b,
+                cache_cap: 4_000_000,
+                ..self.abs.cfg.clone()
+            }))
+        });
+        self
     }
 
     pub fn with_value_net(mut self, net: Option<Arc<ValueNet>>) -> Self {
@@ -186,6 +206,7 @@ impl Policy {
             blueprint: self.blueprint.clone(),
             abs: self.abs.clone(),
             value_net: None,
+            search_abs: self.search_abs.clone(),
         }
     }
 
@@ -318,8 +339,10 @@ impl Policy {
         }
         let leaf = (real.street() == Street::Flop).then(|| LeafCfg {
             blueprint: self.blueprint.clone(),
+            abs: self.abs.clone(),
             limit: Street::Flop,
         });
+        let sabs = self.search_abs.clone().unwrap_or_else(|| self.abs.clone());
         let p = real.to_act();
         // Round-start rooting: solve from the start of this betting round
         // with the actions taken so far as the spine (see cfr::Spine).
@@ -339,7 +362,7 @@ impl Policy {
                 };
                 let start = tracker.map(|t| t.at_round_start());
                 resolve_subgame(
-                    self.abs.clone(),
+                    sabs.clone(),
                     train_cfg,
                     &r.real,
                     &hist[..r.hist_len],
@@ -349,7 +372,7 @@ impl Policy {
                     Some(spine),
                 )
             }
-            None => resolve_subgame(self.abs.clone(), train_cfg, real, hist, params, tracker, leaf, None),
+            None => resolve_subgame(sabs, train_cfg, real, hist, params, tracker, leaf, None),
         };
         let bucket = solver.abs.bucket(real.hole(p), real.board(), rng);
         if let Some(s) = solver.avg_strategy(bucket, hist) {
@@ -822,11 +845,13 @@ mod tests {
             sb: 50,
             bb: 100,
         };
-        // Finer river buckets than the 2-player test: against the
-        // resolved (strong) shoving range, a coarse top bucket mixes the
-        // nuts with hands that should fold.
+        // The blueprint's 6 river buckets are too coarse here: against
+        // the resolved (strong) shoving range the top bucket mixes the
+        // nuts with hands that correctly fold (~18% fold measured), so
+        // the solver gets its own finer abstraction (Pluribus: lossless
+        // on the current street).
         let abs = Arc::new(Abstraction::new(AbsConfig {
-            postflop_buckets: 30,
+            postflop_buckets: 6,
             equity_rollouts: 50,
             cache_cap: 100_000,
             ..AbsConfig::default()
@@ -840,7 +865,8 @@ mod tests {
                 centroids: None,
             },
             abs.clone(),
-        );
+        )
+        .with_search_buckets(Some(30));
         let mut table = Table::new(&hand_cfg, 0, deck);
         let mut tracker = RangeTracker::new(3);
         // p0 calls, p1 calls, p2 checks; checked around to the river.
@@ -1438,6 +1464,7 @@ mod tests {
             Some(&tracker),
             Some(LeafCfg {
                 blueprint: bp.clone(),
+                abs: abs.clone(),
                 limit: Street::Flop,
             }),
         None,

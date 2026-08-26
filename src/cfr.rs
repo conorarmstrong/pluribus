@@ -82,6 +82,9 @@ impl Default for TrainConfig {
 /// exploitable by a single fixed continuation.
 pub struct LeafCfg {
     pub blueprint: Arc<Blueprint>,
+    /// The blueprint's own abstraction (rollouts look infosets up in it;
+    /// the solver's abstraction may be finer).
+    pub abs: Arc<Abstraction>,
     pub limit: Street,
 }
 
@@ -678,8 +681,8 @@ impl Trainer {
         let mut hist = hist.to_vec();
         while !h.is_terminal() {
             let p = h.to_act();
-            let acts = self.abs.abstract_actions(&h);
-            let bucket = self.abs.bucket(h.hole(p), h.board(), rng);
+            let acts = lc.abs.abstract_actions(&h);
+            let bucket = lc.abs.bucket(h.hole(p), h.board(), rng);
             let mut probs: Vec<f64> = match lc.blueprint.get(bucket, &hist) {
                 Some(s) if s.len() == acts.len() => s.iter().map(|&x| x as f64).collect(),
                 _ => vec![1.0 / acts.len() as f64; acts.len()],
@@ -687,7 +690,7 @@ impl Trainer {
             apply_bias(&mut probs, &acts, biases[p]);
             let a = acts[sample_index(&probs, rng)];
             let street_before = h.street();
-            h.apply(self.abs.concrete(&h, a));
+            h.apply(lc.abs.concrete(&h, a));
             hist.push(a.token());
             if !h.is_terminal() && h.street() != street_before {
                 hist.push(TOKEN_STREET_SEP);

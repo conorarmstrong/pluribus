@@ -248,6 +248,11 @@ enum Cmd {
         /// start of the betting round (the pre-A3 behaviour; A/B arm).
         #[arg(long)]
         decision_root: bool,
+        /// Postflop card buckets inside multiway resolves (equity
+        /// quantiles; exact per board on the river). Default: the
+        /// blueprint's.
+        #[arg(long)]
+        search_buckets: Option<u16>,
     },
     /// Lower-bound the blueprint's exploitability with a Local Best Response
     /// agent (Lisý & Bowling 2017): heads-up blind vs blind, other seats fold.
@@ -284,6 +289,11 @@ enum Cmd {
         /// start of the betting round (the pre-A3 behaviour; A/B arm).
         #[arg(long)]
         decision_root: bool,
+        /// Postflop card buckets inside multiway resolves (equity
+        /// quantiles; exact per board on the river). Default: the
+        /// blueprint's.
+        #[arg(long)]
+        search_buckets: Option<u16>,
     },
     /// Safety ablation: unsafe vs gadget river resolving under corrupted
     /// range beliefs — reports best-response margins beyond safety values.
@@ -765,6 +775,7 @@ fn main() {
             search_ms,
             search_iters,
             decision_root,
+            search_buckets,
         } => {
             let params = search.then_some(SearchParams {
                 time_ms: search_ms,
@@ -772,7 +783,8 @@ fn main() {
                 round_root: !decision_root,
                 ..SearchParams::default()
             });
-            let policy = load_policy_strat(&blueprint, strat_prev.as_deref());
+            let policy = load_policy_strat(&blueprint, strat_prev.as_deref())
+                .with_search_buckets(search_buckets);
             let cfg = HandConfig {
                 num_players: policy.blueprint.num_players,
                 ..HandConfig::default()
@@ -782,7 +794,7 @@ fn main() {
                 if multiway { "multiway, LBR seat rotating" } else { "blind-vs-blind" },
                 cfg.num_players,
                 if search {
-                    format!(", bot searching {search_ms}ms/{search_iters} iters per decision, {} root", if decision_root { "decision" } else { "round" })
+                    format!(", bot searching {search_ms}ms/{search_iters} iters per decision, {} root, {} buckets", if decision_root { "decision" } else { "round" }, search_buckets.map_or("blueprint".to_string(), |b| b.to_string()))
                 } else {
                     String::new()
                 }
@@ -819,6 +831,7 @@ fn main() {
             search_ms,
             search_iters,
             decision_root,
+            search_buckets,
         } => {
             let params = search.then_some(SearchParams {
                 time_ms: search_ms,
@@ -826,7 +839,8 @@ fn main() {
                 round_root: !decision_root,
                 ..SearchParams::default()
             });
-            let policy = load_policy_strat(&blueprint, strat_prev.as_deref());
+            let policy = load_policy_strat(&blueprint, strat_prev.as_deref())
+                .with_search_buckets(search_buckets);
             let cfg = HandConfig {
                 num_players: policy.blueprint.num_players,
                 ..HandConfig::default()
@@ -836,7 +850,7 @@ fn main() {
                  turn/river subgame best response{}...",
                 cfg.num_players,
                 if search {
-                    format!(", bot searching {search_ms}ms/{search_iters} iters per decision, {} root", if decision_root { "decision" } else { "round" })
+                    format!(", bot searching {search_ms}ms/{search_iters} iters per decision, {} root, {} buckets", if decision_root { "decision" } else { "round" }, search_buckets.map_or("blueprint".to_string(), |b| b.to_string()))
                 } else {
                     String::new()
                 }

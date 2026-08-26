@@ -563,16 +563,20 @@ impl Abstraction {
     /// shared map is read-locked (get) before ever write-locking (entry).
     fn river_bucket(&self, hole: [Card; 2], board: &[Card]) -> u16 {
         debug_assert_eq!(board.len(), 5);
+        // Keyed by board AND bucket count: abstractions with different
+        // bucket counts coexist in one thread (blueprint lookups vs a
+        // finer subgame solver) and must not share a table.
         thread_local! {
-            static LAST: std::cell::RefCell<Option<([Card; 5], [u8; 4], std::sync::Arc<Vec<u16>>)>> =
+            static LAST: std::cell::RefCell<Option<([Card; 5], u16, [u8; 4], std::sync::Arc<Vec<u16>>)>> =
                 const { std::cell::RefCell::new(None) };
         }
         let b5 = [board[0], board[1], board[2], board[3], board[4]];
+        let nb = self.cfg.postflop_buckets;
         let memo = LAST.with(|l| {
             l.borrow()
                 .as_ref()
-                .filter(|(b, _, _)| *b == b5)
-                .map(|(_, p, t)| (*p, t.clone()))
+                .filter(|(b, n, _, _)| *b == b5 && *n == nb)
+                .map(|(_, _, p, t)| (*p, t.clone()))
         });
         let (perm, table) = match memo {
             Some(hit) => hit,
@@ -591,7 +595,7 @@ impl Abstraction {
                         })
                         .clone(),
                 };
-                LAST.with(|l| *l.borrow_mut() = Some((b5, perm, table.clone())));
+                LAST.with(|l| *l.borrow_mut() = Some((b5, nb, perm, table.clone())));
                 (perm, table)
             }
         };
