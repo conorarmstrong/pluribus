@@ -162,7 +162,8 @@ setting depends on budget. Either answer is worth having before renting
 hardware.
 
 **A3. Search on every postflop decision, multiway.** *The biggest single
-gap. Weeks.*
+gap. Weeks.* **Status 26 Aug: round-start rooting built (commit 66d272b),
+`lbr --multiway --search` and `br --search` built; 8-seed gate running.**
 Today `search_dist` (`src/bot.rs`) hands any spot with three or more live
 players to `resolve_subgame`: sampled MCCFR from the current decision
 point, hidden cards sampled from the tracker, flop depth-limited with the

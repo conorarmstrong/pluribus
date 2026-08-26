@@ -106,6 +106,14 @@ Actions: `f` fold · `c`/`k` check/call · `r 500` raise TO 500 · `a` all-in ·
   off-tree bet is re-solved at its actual size (**nested re-solving**)
   instead of being priced at the nearest abstract size — the shadow hand
   is kept only for blueprint infoset lookups;
+- with three or more live players, roots the subgame at the **start of
+  the current betting round** (Pluribus): the actions taken so far form
+  a spine, the bot's own are held fixed, every other seat's strategy in
+  the round is re-solved from the ranges it held when the round began,
+  and off-tree bets on the spine are solved at their real size.
+  Traversals are steered onto the spine (eps 0.5 mixture,
+  importance-weighted, so the solve stays unbiased). `--decision-root`
+  on the probes restores the pre-A3 current-decision rooting;
 - on the flop, solves **depth-limited** to the end of the street; at the
   leaves each player picks among four continuation strategies (blueprint
   as-is, fold-, call- or raise-biased) valued by blueprint rollouts —
@@ -196,6 +204,9 @@ versions can be compared on identical deals.
 | `--runouts` | 100 | Equity runouts on the greedy (preflop/flop) streets |
 | `--strat-prev` | – | Previous blueprint for strategic-abstraction lookups |
 | `--seed` | 1 | RNG seed |
+| `--search` | off | The bot resolves postflop decisions online, so the probe faces the bot as it plays |
+| `--search-ms` / `--search-iters` | 2000 / 2M | Per-decision budget; the iteration cap makes the probe load-independent |
+| `--decision-root` | off | Root multiway resolves at the current decision (pre-A3 A/B arm) |
 
 ### `lbr`
 **Local Best Response** (Lisý & Bowling 2017): a lower bound on the
@@ -220,6 +231,14 @@ reproducibility: `br` and both `lbr` modes are bit-for-bit reproducible per
 seed only single-threaded (`RAYON_NUM_THREADS=1`); parallel runs vary by
 roughly 1-3% of the bound between identical invocations (`eval` does not).
 Paired-seed comparisons stay valid; the variation is far inside the CIs.
+
+`--search` (with `--search-ms`, `--search-iters`, `--decision-root`, as on
+`br`) has every bot seat resolve its postflop decisions online, sharing
+one public-history range tracker per hand, so the LBR faces the bot as
+it actually plays rather than the raw blueprint. The LBR's own range
+model of the bot stays the blueprint (it cannot see the resolved
+strategy), so with `--search` the number is a probe result, not a strict
+lower bound. Multiway only.
 
 ### `benchmark`
 Replays all 10,000 hands the real Pluribus played in the Science 2019
