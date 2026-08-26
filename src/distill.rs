@@ -99,6 +99,7 @@ pub fn collect(policy: &Policy, cfg: &HandConfig, dcfg: &DistillCfg) -> (Records
                     &train_cfg,
                     Some(&tracker),
                     Some(&mut sessions[p]),
+                    Some(&table.round),
                     &mut rng,
                 );
                 if table.real.street() != Street::Preflop {
@@ -286,6 +287,7 @@ mod tests {
                 qre_lambda: None,
                 safe_resolve: false,
                 adaptive: false,
+                round_root: true,
             },
             alpha: 0.5,
             seed: 42,

@@ -507,6 +507,7 @@ pub fn run(
                     &train_cfg,
                     Some(&st.tracker),
                     Some(&mut st.session),
+                    Some(&st.table.round),
                     &mut rng,
                 ),
                 None => policy.act_blueprint(&st.table.shadow, &st.table.hist, &mut rng),

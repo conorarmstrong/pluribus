@@ -233,6 +233,21 @@ enum Cmd {
         strat_prev: Option<String>,
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        /// The bot resolves postflop decisions online (the probe then
+        /// faces the bot as it actually plays, not the raw blueprint).
+        #[arg(long)]
+        search: bool,
+        /// Per-decision search budget in milliseconds (with --search).
+        #[arg(long, default_value_t = 2_000)]
+        search_ms: u64,
+        /// Per-decision search iteration cap (with --search); a cap makes
+        /// the probe independent of machine load.
+        #[arg(long, default_value_t = 2_000_000)]
+        search_iters: u64,
+        /// Root multiway resolves at the current decision instead of the
+        /// start of the betting round (the pre-A3 behaviour; A/B arm).
+        #[arg(long)]
+        decision_root: bool,
     },
     /// Lower-bound the blueprint's exploitability with a Local Best Response
     /// agent (Lisý & Bowling 2017): heads-up blind vs blind, other seats fold.
@@ -254,6 +269,21 @@ enum Cmd {
         strat_prev: Option<String>,
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        /// The bot resolves postflop decisions online (the probe then
+        /// faces the bot as it actually plays, not the raw blueprint).
+        #[arg(long)]
+        search: bool,
+        /// Per-decision search budget in milliseconds (with --search).
+        #[arg(long, default_value_t = 2_000)]
+        search_ms: u64,
+        /// Per-decision search iteration cap (with --search); a cap makes
+        /// the probe independent of machine load.
+        #[arg(long, default_value_t = 2_000_000)]
+        search_iters: u64,
+        /// Root multiway resolves at the current decision instead of the
+        /// start of the betting round (the pre-A3 behaviour; A/B arm).
+        #[arg(long)]
+        decision_root: bool,
     },
     /// Safety ablation: unsafe vs gadget river resolving under corrupted
     /// range beliefs — reports best-response margins beyond safety values.
@@ -731,20 +761,38 @@ fn main() {
             runouts,
             strat_prev,
             seed,
+            search,
+            search_ms,
+            search_iters,
+            decision_root,
         } => {
+            let params = search.then_some(SearchParams {
+                time_ms: search_ms,
+                max_iters: search_iters,
+                round_root: !decision_root,
+                ..SearchParams::default()
+            });
             let policy = load_policy_strat(&blueprint, strat_prev.as_deref());
             let cfg = HandConfig {
                 num_players: policy.blueprint.num_players,
                 ..HandConfig::default()
             };
             println!(
-                "LBR probe: {hands} hands {} ({}-max game, {runouts} runouts)...",
+                "LBR probe: {hands} hands {} ({}-max game, {runouts} runouts{})...",
                 if multiway { "multiway, LBR seat rotating" } else { "blind-vs-blind" },
-                cfg.num_players
+                cfg.num_players,
+                if search {
+                    format!(", bot searching {search_ms}ms/{search_iters} iters per decision, {} root", if decision_root { "decision" } else { "round" })
+                } else {
+                    String::new()
+                }
             );
+            if search && !multiway {
+                die("--search is only wired into the multiway LBR probe (use --multiway)");
+            }
             let started = std::time::Instant::now();
             let r = if multiway {
-                lbr::run_lbr_multiway(&policy, &cfg, hands, runouts, seed)
+                lbr::run_lbr_multiway(&policy, &cfg, hands, runouts, seed, params)
             } else {
                 lbr::run_lbr(&policy, &cfg, hands, runouts, seed)
             };
@@ -767,7 +815,17 @@ fn main() {
             runouts,
             strat_prev,
             seed,
+            search,
+            search_ms,
+            search_iters,
+            decision_root,
         } => {
+            let params = search.then_some(SearchParams {
+                time_ms: search_ms,
+                max_iters: search_iters,
+                round_root: !decision_root,
+                ..SearchParams::default()
+            });
             let policy = load_policy_strat(&blueprint, strat_prev.as_deref());
             let cfg = HandConfig {
                 num_players: policy.blueprint.num_players,
@@ -775,11 +833,16 @@ fn main() {
             };
             println!(
                 "BR probe: {hands} hands blind-vs-blind ({}-max game), exact \
-                 turn/river subgame best response...",
-                cfg.num_players
+                 turn/river subgame best response{}...",
+                cfg.num_players,
+                if search {
+                    format!(", bot searching {search_ms}ms/{search_iters} iters per decision, {} root", if decision_root { "decision" } else { "round" })
+                } else {
+                    String::new()
+                }
             );
             let started = std::time::Instant::now();
-            let r = br::run_br(&policy, &cfg, hands, runouts, seed);
+            let r = br::run_br(&policy, &cfg, hands, runouts, seed, params);
             println!(
                 "BR probe wins {:+.1} mbb/hand (95% CI ±{:.1}) over {} hands in {:.1}s",
                 r.mbb_per_hand,

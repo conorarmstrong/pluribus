@@ -54,6 +54,11 @@ pub struct RangeTracker {
     /// (valuenet, distill, eval) face literal blueprint opponents where
     /// hard Bayes is exact.
     widen: bool,
+    /// Weights as they stood when the current betting round began (the
+    /// snapshot taken at the last `exclude`, i.e. the last street
+    /// change): the beliefs a round-rooted subgame starts from, since the
+    /// round's own actions are solved inside it.
+    round_start: Vec<Vec<f64>>,
 }
 
 impl RangeTracker {
@@ -63,6 +68,19 @@ impl RangeTracker {
             combos: all_combos(),
             weights: vec![vec![1.0; NUM_COMBOS]; n],
             widen: false,
+            round_start: vec![vec![1.0; NUM_COMBOS]; n],
+        }
+    }
+
+    /// A tracker holding every seat's range as it was at the start of the
+    /// current betting round.
+    pub fn at_round_start(&self) -> RangeTracker {
+        RangeTracker {
+            n: self.n,
+            combos: self.combos.clone(),
+            weights: self.round_start.clone(),
+            widen: self.widen,
+            round_start: self.round_start.clone(),
         }
     }
 
@@ -82,6 +100,9 @@ impl RangeTracker {
                 }
             }
         }
+        // New board cards mean a new betting round: snapshot the beliefs
+        // the round starts from.
+        self.round_start = self.weights.clone();
     }
 
     /// Overwrite every combo weight for a seat (belief injection: rigged

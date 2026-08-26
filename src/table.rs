@@ -19,6 +19,22 @@ pub struct Table {
     pub real: Hand,
     pub shadow: Hand,
     pub hist: Vec<u8>,
+    /// The current betting round so far: the real state when the round
+    /// began and every concrete action taken since. Multiway search roots
+    /// its subgame here (Pluribus's round-start rooting) instead of at
+    /// the current decision.
+    pub round: RoundRoot,
+}
+
+/// One betting round of real play: the state at its start plus the
+/// concrete actions taken since, in order.
+#[derive(Clone, Debug)]
+pub struct RoundRoot {
+    pub real: Hand,
+    /// `Table::hist` length when the round began (after the street
+    /// separator), so `hist[hist_len..]` are this round's tokens.
+    pub hist_len: usize,
+    pub actions: Vec<(usize, PlayerAction)>,
 }
 
 impl Table {
@@ -26,6 +42,11 @@ impl Table {
         let real = Hand::new(cfg, button, deck);
         Table {
             shadow: real.clone(),
+            round: RoundRoot {
+                real: real.clone(),
+                hist_len: 0,
+                actions: Vec::new(),
+            },
             real,
             hist: Vec::with_capacity(32),
         }
@@ -54,9 +75,11 @@ impl Table {
         // Concrete amount computed from the real pot, so real bets stay
         // sensible even if the shadow has drifted.
         let real_act = Self::concrete_or_call(&self.real, a, abs);
+        let actor = self.real.to_act();
         self.real.apply(real_act);
         self.push_token(a, self.shadow.street() != street_before);
         self.resync_if_diverged();
+        self.note_round(actor, real_act);
         real_act
     }
 
@@ -89,9 +112,28 @@ impl Table {
         let street_before = self.shadow.street();
         let abs_a = self.map_concrete(a, abs);
         self.shadow.apply(abs.concrete(&self.shadow, abs_a));
+        let actor = self.real.to_act();
         self.real.apply(a);
         self.push_token(abs_a, self.shadow.street() != street_before);
         self.resync_if_diverged();
+        self.note_round(actor, a);
+    }
+
+    /// Record `actor`'s concrete action in the current round, or start a
+    /// new round when the action closed the street.
+    fn note_round(&mut self, actor: usize, a: PlayerAction) {
+        if self.real.is_terminal() {
+            return;
+        }
+        if self.real.street() != self.round.real.street() {
+            self.round = RoundRoot {
+                real: self.real.clone(),
+                hist_len: self.hist.len(),
+                actions: Vec::new(),
+            };
+        } else {
+            self.round.actions.push((actor, a));
+        }
     }
 
     fn push_token(&mut self, a: AbsAction, street_changed: bool) {
@@ -301,6 +343,7 @@ pub fn run_eval_search(
                         &train_cfg,
                         Some(&tracker),
                         Some(&mut session),
+                        Some(&table.round),
                         &mut rng,
                     )
                 } else {
@@ -394,6 +437,7 @@ pub fn run_eval_paired_policies(
                     &train_cfg,
                     Some(&tracker),
                     Some(&mut session),
+                    Some(&table.round),
                     &mut seat_rngs[p],
                 ),
                 _ => policy.act_blueprint(&table.shadow, &table.hist, &mut seat_rngs[p]),
@@ -478,6 +522,7 @@ mod tests {
     use super::*;
     use crate::abstraction::AbsConfig;
     use crate::cfr::Blueprint;
+    use crate::engine::Street;
     use std::collections::HashMap;
 
     fn abs_small() -> Abstraction {
@@ -500,6 +545,40 @@ mod tests {
             },
             std::sync::Arc::new(abs_small()),
         )
+    }
+
+    #[test]
+    fn round_root_tracks_the_current_betting_round() {
+        let abs = abs_small();
+        let cfg = HandConfig {
+            num_players: 3,
+            ..HandConfig::default()
+        };
+        let mut t = Table::new(&cfg, 0, fresh_deck());
+        assert_eq!(t.round.hist_len, 0);
+        assert!(t.round.actions.is_empty());
+        // Preflop, button 0: p0 calls, p1 calls, p2 checks -> flop.
+        t.apply_abs(AbsAction::CheckCall, &abs);
+        t.apply_abs(AbsAction::CheckCall, &abs);
+        assert_eq!(t.round.actions.len(), 2);
+        assert_eq!(t.round.actions[0].0, 0);
+        assert_eq!(t.round.actions[1].0, 1);
+        t.apply_abs(AbsAction::CheckCall, &abs);
+        assert_eq!(t.real.street(), Street::Flop);
+        assert_eq!(t.round.real.street(), Street::Flop);
+        assert_eq!(t.round.hist_len, t.hist.len(), "root sits after the street separator");
+        assert!(t.round.actions.is_empty());
+        // Flop: p1 bets, p2 folds; the round records both real actions.
+        let acts = abs.abstract_actions(&t.shadow);
+        let bet = *acts.iter().find(|a| matches!(a, AbsAction::Bet(_))).unwrap();
+        let real_bet = t.apply_abs(bet, &abs);
+        t.apply_abs(AbsAction::Fold, &abs);
+        assert_eq!(t.round.actions, vec![(1, real_bet), (2, PlayerAction::Fold)]);
+        assert_eq!(t.round.hist_len + t.round.actions.len(), t.hist.len());
+        // A concrete off-tree action is recorded at its real size.
+        let (lo, _) = t.real.raise_bounds().unwrap();
+        t.apply_concrete(PlayerAction::RaiseTo(lo + 7), &abs);
+        assert_eq!(t.round.actions[2], (0, PlayerAction::RaiseTo(lo + 7)));
     }
 
     #[test]

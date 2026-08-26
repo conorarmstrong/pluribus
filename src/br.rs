@@ -416,11 +416,23 @@ pub struct BrResult {
 /// game (other seats fold), alternating blind seats — identical harness to
 /// `run_lbr`, so results are directly comparable. Preflop/flop use the
 /// greedy LBR action; turn/river decisions use the exact subgame BR.
-pub fn run_br(policy: &Policy, cfg: &HandConfig, hands: u64, runouts: u32, seed: u64) -> BrResult {
+pub fn run_br(
+    policy: &Policy,
+    cfg: &HandConfig,
+    hands: u64,
+    runouts: u32,
+    seed: u64,
+    search: Option<crate::bot::SearchParams>,
+) -> BrResult {
     let n = cfg.num_players;
     let bb = cfg.bb as f64;
     let lbr = Lbr::new(policy, runouts);
     let combos = all_combos();
+    let train_cfg = crate::cfr::TrainConfig {
+        hand: cfg.clone(),
+        prune_after: u64::MAX,
+        ..crate::cfr::TrainConfig::default()
+    };
     let results: Vec<f64> = (0..hands)
         .into_par_iter()
         .map(|i| {
@@ -438,6 +450,10 @@ pub fn run_br(policy: &Policy, cfg: &HandConfig, hands: u64, runouts: u32, seed:
             let mut table = crate::table::Table::new(cfg, button, deck);
             let mut range = BotRange::new();
             range.exclude(&combos, &table.real.hole(probe_seat));
+            // With `search`, the bot resolves postflop decisions online
+            // (the probe's range model of the bot stays the blueprint).
+            let mut tracker = search.map(|_| crate::search::RangeTracker::new(n));
+            let mut session = crate::bot::SearchSession::new();
 
             let mut guard = 0;
             while !table.real.is_terminal() {
@@ -447,9 +463,25 @@ pub fn run_br(policy: &Policy, cfg: &HandConfig, hands: u64, runouts: u32, seed:
                 let street_before = table.real.street();
                 if p == bot_seat {
                     let acts = policy.abs.abstract_actions(&table.shadow);
-                    let a = policy.act_blueprint(&table.shadow, &table.hist, &mut rng);
+                    let a = match (search, tracker.as_ref()) {
+                        (Some(params), Some(tr)) => policy.act_with_search(
+                            &table.real,
+                            &table.shadow,
+                            &table.hist,
+                            params,
+                            &train_cfg,
+                            Some(tr),
+                            Some(&mut session),
+                            Some(&table.round),
+                            &mut rng,
+                        ),
+                        _ => policy.act_blueprint(&table.shadow, &table.hist, &mut rng),
+                    };
                     if let Some(idx) = acts.iter().position(|&x| x == a) {
                         lbr.observe(&mut range, &table.shadow, &table.hist, &acts, idx);
+                    }
+                    if let Some(tr) = tracker.as_mut() {
+                        tr.observe(p, a, &table.shadow, &table.hist, &policy.blueprint, &policy.abs);
                     }
                     table.apply_abs(a, &policy.abs);
                 } else if p == probe_seat {
@@ -466,12 +498,28 @@ pub fn run_br(policy: &Policy, cfg: &HandConfig, hands: u64, runouts: u32, seed:
                     } else {
                         lbr.action(&table, &range, bot_seat, &mut rng)
                     };
+                    if let Some(tr) = tracker.as_mut() {
+                        tr.observe(p, a, &table.shadow, &table.hist, &policy.blueprint, &policy.abs);
+                    }
                     table.apply_abs(a, &policy.abs);
                 } else {
+                    if let Some(tr) = tracker.as_mut() {
+                        tr.observe(
+                            p,
+                            AbsAction::Fold,
+                            &table.shadow,
+                            &table.hist,
+                            &policy.blueprint,
+                            &policy.abs,
+                        );
+                    }
                     table.apply_abs(AbsAction::Fold, &policy.abs);
                 }
                 if table.real.street() != street_before {
                     range.exclude(&combos, table.real.board());
+                    if let Some(tr) = tracker.as_mut() {
+                        tr.exclude(table.real.board());
+                    }
                 }
             }
             table.real.utilities()[probe_seat] as f64 / bb * 1000.0
@@ -663,8 +711,8 @@ mod tests {
             num_players: 2,
             ..HandConfig::default()
         };
-        let r1 = run_br(&policy, &cfg, 200, 16, 99);
-        let r2 = run_br(&policy, &cfg, 200, 16, 99);
+        let r1 = run_br(&policy, &cfg, 200, 16, 99, None);
+        let r2 = run_br(&policy, &cfg, 200, 16, 99, None);
         assert_eq!(
             r1.mbb_per_hand, r2.mbb_per_hand,
             "same seed must reproduce exactly"

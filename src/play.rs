@@ -91,6 +91,7 @@ pub fn play(policy: &Policy, opts: &PlayOpts) {
                             &train_cfg,
                             Some(&tracker),
                             Some(&mut session),
+                            Some(&table.round),
                             &mut rng,
                         ),
                     _ => policy.act_blueprint(&table.shadow, &table.hist, &mut rng),

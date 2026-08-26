@@ -551,10 +551,22 @@ impl Lbr<'_> {
 /// Bit-for-bit reproducible per seed when run single-threaded
 /// (RAYON_NUM_THREADS=1); parallel runs vary by ~1-3% of the bound
 /// (measured 2026-08-25, cause not yet isolated; `eval` does not vary).
-pub fn run_lbr_multiway(policy: &Policy, cfg: &HandConfig, hands: u64, runouts: u32, seed: u64) -> LbrResult {
+pub fn run_lbr_multiway(
+    policy: &Policy,
+    cfg: &HandConfig,
+    hands: u64,
+    runouts: u32,
+    seed: u64,
+    search: Option<crate::bot::SearchParams>,
+) -> LbrResult {
     let n = cfg.num_players;
     let bb = cfg.bb as f64;
     let lbr = Lbr::new(policy, runouts);
+    let train_cfg = crate::cfr::TrainConfig {
+        hand: cfg.clone(),
+        prune_after: u64::MAX,
+        ..crate::cfr::TrainConfig::default()
+    };
     let results: Vec<f64> = (0..hands)
         .into_par_iter()
         .map(|i| {
@@ -575,28 +587,55 @@ pub fn run_lbr_multiway(policy: &Policy, cfg: &HandConfig, hands: u64, runouts: 
                 })
                 .collect();
 
+            // With `search`, the bot seats resolve postflop decisions
+            // online (shared public-history range tracker, one search
+            // session per seat) so the LBR faces the bot as it actually
+            // plays. The LBR's own range model of the bot stays the
+            // blueprint (it cannot see the resolved strategy).
+            let mut tracker = search.map(|_| crate::search::RangeTracker::new(n));
+            let mut sessions: Vec<crate::bot::SearchSession> =
+                (0..n).map(|_| crate::bot::SearchSession::new()).collect();
             let mut guard = 0;
             while !table.real.is_terminal() {
                 guard += 1;
                 assert!(guard < 400, "multiway LBR hand did not terminate");
                 let p = table.real.to_act();
                 let street_before = table.real.street();
-                if p == lbr_seat {
-                    let a = lbr.action_multiway(&table, &ranges, &mut rng);
-                    table.apply_abs(a, &policy.abs);
+                let a = if p == lbr_seat {
+                    lbr.action_multiway(&table, &ranges, &mut rng)
                 } else {
                     let acts = policy.abs.abstract_actions(&table.shadow);
-                    let a = policy.act_blueprint(&table.shadow, &table.hist, &mut rng);
+                    let a = match (search, tracker.as_ref()) {
+                        (Some(params), Some(tr)) => policy.act_with_search(
+                            &table.real,
+                            &table.shadow,
+                            &table.hist,
+                            params,
+                            &train_cfg,
+                            Some(tr),
+                            Some(&mut sessions[p]),
+                            Some(&table.round),
+                            &mut rng,
+                        ),
+                        _ => policy.act_blueprint(&table.shadow, &table.hist, &mut rng),
+                    };
                     if let (Some(idx), Some(r)) =
                         (acts.iter().position(|&x| x == a), ranges[p].as_mut())
                     {
                         lbr.observe(r, &table.shadow, &table.hist, &acts, idx);
                     }
-                    table.apply_abs(a, &policy.abs);
+                    a
+                };
+                if let Some(tr) = tracker.as_mut() {
+                    tr.observe(p, a, &table.shadow, &table.hist, &policy.blueprint, &policy.abs);
                 }
+                table.apply_abs(a, &policy.abs);
                 if table.real.street() != street_before {
                     for r in ranges.iter_mut().flatten() {
                         r.exclude(&lbr.combos, table.real.board());
+                    }
+                    if let Some(tr) = tracker.as_mut() {
+                        tr.exclude(table.real.board());
                     }
                 }
             }
@@ -807,8 +846,8 @@ mod tests {
     fn multiway_lbr_crushes_stations_and_is_deterministic() {
         let policy = empty_policy();
         let cfg = HandConfig::default(); // 6-max
-        let a = run_lbr_multiway(&policy, &cfg, 300, 12, 5);
-        let b = run_lbr_multiway(&policy, &cfg, 300, 12, 5);
+        let a = run_lbr_multiway(&policy, &cfg, 300, 12, 5, None);
+        let b = run_lbr_multiway(&policy, &cfg, 300, 12, 5, None);
         assert_eq!(a.mbb_per_hand.to_bits(), b.mbb_per_hand.to_bits(), "not deterministic");
         assert!(
             a.mbb_per_hand - a.ci95 > 1_000.0,

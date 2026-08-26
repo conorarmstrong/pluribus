@@ -10,7 +10,7 @@
 
 use crate::abstraction::{AbsAction, AbsConfig, Abstraction, Centroids, TOKEN_LEAF, TOKEN_STREET_SEP};
 use crate::cards::fresh_deck;
-use crate::engine::{Hand, HandConfig, Street, MAX_PLAYERS};
+use crate::engine::{Hand, HandConfig, PlayerAction, Street, MAX_PLAYERS};
 use dashmap::DashMap;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
@@ -91,6 +91,49 @@ const BIAS_MULT: f64 = 5.0;
 /// Re-randomizes hidden cards at a subgame root before each traversal.
 pub type RootSampler<'a> = dyn Fn(&mut Hand, &mut SmallRng) + Sync + 'a;
 
+/// Round-start rooting for online search (Pluribus): the subgame is rooted
+/// at the start of the current betting round and the actions actually
+/// taken since form the "spine". The hero's spine actions are held fixed
+/// (already taken); every other player's strategy in the round is
+/// re-solved, so their ranges at the hero's current decision are the
+/// resolved reach-weighted ones rather than blueprint Bayes. Along the
+/// spine the tree uses the real concrete actions (an off-tree bet is
+/// solved at its actual size, replacing the nearest abstract size at
+/// that node).
+pub struct Spine {
+    pub hero: usize,
+    /// `hist` length at the round's start.
+    pub base_len: usize,
+    /// (seat, real action) for each step taken in the round so far.
+    pub steps: Vec<(usize, PlayerAction)>,
+    /// The abstract token recorded for each step (shadow mapping).
+    pub tokens: Vec<u8>,
+}
+
+/// Mixture weight for spine-targeted sampling: at a non-traverser spine
+/// node the actor's action is drawn from eps*spine + (1-eps)*sigma, with
+/// the sample importance-weighted by sigma/q so regrets stay unbiased,
+/// concentrating traversals on the line actually being played.
+const SPINE_EPS: f64 = 0.5;
+
+impl Spine {
+    /// If the node (`hist` after `h`'s history, menu `acts`) lies on the
+    /// spine: (index of the spine action in `acts`, its real concrete
+    /// action, whether the actor is the hero).
+    fn step_at(&self, hist: &[u8], h: &Hand, acts: &[AbsAction]) -> Option<(usize, PlayerAction, bool)> {
+        let k = hist.len().checked_sub(self.base_len)?;
+        if k >= self.steps.len() || hist[self.base_len..] != self.tokens[..k] {
+            return None;
+        }
+        let (seat, act) = self.steps[k];
+        if h.to_act() != seat {
+            return None;
+        }
+        let si = acts.iter().position(|a| a.token() == self.tokens[k])?;
+        Some((si, act, seat == self.hero))
+    }
+}
+
 /// Restricted Nash response training (Johanson et al. 2008): with
 /// probability `p`, decided once per traversal, every opponent plays the
 /// fixed `model` for the whole hand (and contributes nothing to the average
@@ -119,6 +162,8 @@ pub struct Trainer {
     qre_lambda: Option<f64>,
     /// Restricted Nash response mixture (blueprint training only).
     rnr: Option<RnrCfg>,
+    /// Round-start rooting for subgame solves.
+    spine: Option<Spine>,
     /// RNR opponent model as a fixed blueprint (e.g. a cloned static
     /// opponent). When set, model-opponent traversals sample from this
     /// strategy instead of `rnr.model`'s baseline. Must share this trainer's
@@ -199,6 +244,7 @@ impl Trainer {
             plus: false,
             qre_lambda: None,
             rnr: None,
+            spine: None,
             rnr_opp: None,
             vr: false,
             baselines: DashMap::with_hasher(ahash::RandomState::new()),
@@ -231,6 +277,20 @@ impl Trainer {
     pub fn with_leaf(mut self, leaf: Option<LeafCfg>) -> Self {
         self.leaf = leaf;
         self
+    }
+
+    pub fn with_spine(mut self, spine: Option<Spine>) -> Self {
+        self.spine = spine;
+        self
+    }
+
+    /// Concrete action for child `i` of `h`: the real action on the spine
+    /// step, the abstract mapping elsewhere.
+    fn child_action(&self, h: &Hand, a: AbsAction, i: usize, step: Option<(usize, PlayerAction, bool)>) -> PlayerAction {
+        match step {
+            Some((si, real, _)) if si == i => real,
+            _ => self.abs.concrete(h, a),
+        }
     }
 
     pub fn with_plus(mut self, plus: bool) -> Self {
@@ -378,6 +438,22 @@ impl Trainer {
             (s, node.regret.clone())
         };
 
+        let step = self.spine.as_ref().and_then(|sp| sp.step_at(hist, h, &acts));
+        if let Some((si, real, true)) = step {
+            // The hero's already-taken action this round: fixed, no
+            // learning at this node.
+            let mut child = h.clone();
+            child.apply(real);
+            let depth = hist.len();
+            hist.push(acts[si].token());
+            if !child.is_terminal() && child.street() != h.street() {
+                hist.push(TOKEN_STREET_SEP);
+            }
+            let v = self.traverse(&child, hist, traverser, weight, prune_ok, model_opp, rng);
+            hist.truncate(depth);
+            return v;
+        }
+
         if p == traverser {
             // Full-width over own actions, with negative-regret pruning.
             let pluribus = self.cfg.pluribus_prune;
@@ -395,7 +471,7 @@ impl Trainer {
             let mut children: Vec<Hand> = Vec::with_capacity(acts.len());
             for (i, &a) in acts.iter().enumerate() {
                 let mut child = h.clone();
-                child.apply(self.abs.concrete(h, a));
+                child.apply(self.child_action(h, a, i, step));
                 if pluribus && child.is_terminal() {
                     explore[i] = true; // terminal payoffs are never pruned
                 }
@@ -484,10 +560,22 @@ impl Trainer {
                     }
                 }
             }
-            let idx = sample_index(&dist, rng);
+            // Spine-targeted sampling at an opponent's spine node.
+            let (idx, weight) = match step {
+                Some((si, _, false)) => {
+                    let idx = if rng.random::<f64>() < SPINE_EPS {
+                        si
+                    } else {
+                        sample_index(&dist, rng)
+                    };
+                    let q = (1.0 - SPINE_EPS) * dist[idx] + if idx == si { SPINE_EPS } else { 0.0 };
+                    (idx, weight * dist[idx] / q)
+                }
+                _ => (sample_index(&dist, rng), weight),
+            };
             let a = acts[idx];
             let mut child = h.clone();
-            child.apply(self.abs.concrete(h, a));
+            child.apply(self.child_action(h, a, idx, step));
             hist.push(a.token());
             if !child.is_terminal() && child.street() != h.street() {
                 hist.push(TOKEN_STREET_SEP);
@@ -1074,6 +1162,54 @@ mod tests {
         assert!(aa_call[1] > 0.8, "AA should call a shove, got {:.3}", aa_call[1]);
         let btn_aa = t.avg_strategy(aa, &[]).expect("root AA visited");
         assert!(btn_aa[0] < 0.1, "button must not fold AA, got {:.3}", btn_aa[0]);
+    }
+
+    /// Spine bookkeeping: a node is on the spine only while the history
+    /// since the round start matches the recorded tokens and the recorded
+    /// seat is the one to act; the hero flag follows the seat.
+    #[test]
+    fn spine_step_matches_history_and_seat() {
+        let abs = Abstraction::new(AbsConfig::default());
+        let cfg = HandConfig {
+            num_players: 3,
+            ..HandConfig::default()
+        };
+        let h0 = Hand::new(&cfg, 0, fresh_deck()); // p0 to act preflop
+        let acts0 = abs.abstract_actions(&h0);
+        let mut h1 = h0.clone();
+        h1.apply(PlayerAction::CheckCall); // p1 to act
+        let acts1 = abs.abstract_actions(&h1);
+        let base = vec![7u8, 7, TOKEN_STREET_SEP];
+        let bet = *acts1.iter().find(|a| matches!(a, AbsAction::Bet(_))).unwrap();
+        let spine = Spine {
+            hero: 1,
+            base_len: base.len(),
+            steps: vec![(0, PlayerAction::CheckCall), (1, PlayerAction::RaiseTo(333))],
+            tokens: vec![AbsAction::CheckCall.token(), bet.token()],
+        };
+        let mut hist = base.clone();
+        let (si, act, hero) = spine.step_at(&hist, &h0, &acts0).expect("root is on the spine");
+        assert_eq!(acts0[si], AbsAction::CheckCall);
+        assert_eq!(act, PlayerAction::CheckCall);
+        assert!(!hero);
+        hist.push(AbsAction::CheckCall.token());
+        let (si, act, hero) = spine.step_at(&hist, &h1, &acts1).expect("second step");
+        assert_eq!(acts1[si], bet);
+        assert_eq!(act, PlayerAction::RaiseTo(333));
+        assert!(hero, "seat 1 is the hero");
+        // Wrong seat to act for the recorded step: off the spine.
+        assert!(spine.step_at(&hist, &h0, &acts0).is_none());
+        // Deviated history: off the spine.
+        let mut dev = base.clone();
+        dev.push(AbsAction::Fold.token());
+        assert!(spine.step_at(&dev, &h1, &acts1).is_none());
+        // Past the last step: off the spine (the current decision).
+        hist.push(bet.token());
+        let mut h2 = h1.clone();
+        h2.apply(PlayerAction::RaiseTo(333));
+        assert!(spine.step_at(&hist, &h2, &abs.abstract_actions(&h2)).is_none());
+        // Shorter than the base: off the spine.
+        assert!(spine.step_at(&base[..1], &h0, &acts0).is_none());
     }
 
     /// Pluribus pruning rules (per-traversal decision, river and terminal

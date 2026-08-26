@@ -10,9 +10,10 @@
 //! with MCCFR.
 
 use crate::abstraction::{AbsAction, Abstraction};
-use crate::cfr::{sample_index, Blueprint, LeafCfg, TrainConfig, Trainer};
+use crate::cfr::{sample_index, Blueprint, LeafCfg, Spine, TrainConfig, Trainer};
 use crate::engine::{Hand, Street};
 use crate::search::RangeTracker;
+use crate::table::RoundRoot;
 use crate::valuenet::ValueNet;
 use rand::rngs::SmallRng;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -108,6 +109,9 @@ pub struct SearchParams {
     /// hero's decision is already near-pure — trivial spots take
     /// milliseconds, the saved time is available to hard ones.
     pub adaptive: bool,
+    /// Multiway MCCFR resolves are rooted at the start of the current
+    /// betting round (Pluribus) rather than at the current decision.
+    pub round_root: bool,
 }
 
 impl Default for SearchParams {
@@ -118,6 +122,7 @@ impl Default for SearchParams {
             qre_lambda: None,
             safe_resolve: false,
             adaptive: false,
+            round_root: true,
         }
     }
 }
@@ -247,10 +252,11 @@ impl Policy {
         train_cfg: &TrainConfig,
         tracker: Option<&RangeTracker>,
         session: Option<&mut SearchSession>,
+        round: Option<&RoundRoot>,
         rng: &mut SmallRng,
     ) -> AbsAction {
         let (acts, probs) =
-            self.search_dist(real, shadow, hist, params, train_cfg, tracker, session, rng);
+            self.search_dist(real, shadow, hist, params, train_cfg, tracker, session, round, rng);
         acts[sample_index(&probs, rng)]
     }
 
@@ -268,6 +274,7 @@ impl Policy {
         train_cfg: &TrainConfig,
         tracker: Option<&RangeTracker>,
         mut session: Option<&mut SearchSession>,
+        round: Option<&RoundRoot>,
         rng: &mut SmallRng,
     ) -> (Vec<AbsAction>, Vec<f64>) {
         if real.street() == Street::Preflop {
@@ -313,8 +320,37 @@ impl Policy {
             blueprint: self.blueprint.clone(),
             limit: Street::Flop,
         });
-        let solver = resolve_subgame(self.abs.clone(), train_cfg, real, hist, params, tracker, leaf);
         let p = real.to_act();
+        // Round-start rooting: solve from the start of this betting round
+        // with the actions taken so far as the spine (see cfr::Spine).
+        let round = round.filter(|r| {
+            params.round_root
+                && !r.actions.is_empty()
+                && r.real.street() == real.street()
+                && r.hist_len + r.actions.len() == hist.len()
+        });
+        let solver = match round {
+            Some(r) => {
+                let spine = Spine {
+                    hero: p,
+                    base_len: r.hist_len,
+                    steps: r.actions.clone(),
+                    tokens: hist[r.hist_len..].to_vec(),
+                };
+                let start = tracker.map(|t| t.at_round_start());
+                resolve_subgame(
+                    self.abs.clone(),
+                    train_cfg,
+                    &r.real,
+                    &hist[..r.hist_len],
+                    params,
+                    start.as_ref(),
+                    leaf,
+                    Some(spine),
+                )
+            }
+            None => resolve_subgame(self.abs.clone(), train_cfg, real, hist, params, tracker, leaf, None),
+        };
         let bucket = solver.abs.bucket(real.hole(p), real.board(), rng);
         if let Some(s) = solver.avg_strategy(bucket, hist) {
             let acts = solver.abs.abstract_actions(real);
@@ -538,11 +574,13 @@ pub fn resolve_subgame(
     params: SearchParams,
     tracker: Option<&RangeTracker>,
     leaf: Option<LeafCfg>,
+    spine: Option<Spine>,
 ) -> Trainer {
     let t = Trainer::new(abs, train_cfg.clone())
         .with_leaf(leaf)
         .with_plus(true)
-        .with_qre(params.qre_lambda);
+        .with_qre(params.qre_lambda)
+        .with_spine(spine);
     match tracker {
         Some(tr) => {
             let sampler = move |h: &mut Hand, rng: &mut SmallRng| {
@@ -732,9 +770,11 @@ mod tests {
                 qre_lambda: None,
                 safe_resolve: false,
                 adaptive: false,
+                round_root: true,
             },
             None,
             None,
+        None,
         );
 
         let mut rng = SmallRng::seed_from_u64(2);
@@ -754,6 +794,98 @@ mod tests {
         done.apply(PlayerAction::CheckCall);
         assert!(done.is_terminal());
         assert!(done.utilities()[0] > 0);
+    }
+
+    /// Round-rooted three-way river resolve: the subgame is rooted at the
+    /// start of the river with the two opponents' actions (shove, call)
+    /// as the spine; the hero holding the nuts must still call.
+    #[test]
+    fn round_rooted_search_calls_the_nuts_three_way() {
+        use crate::table::Table;
+        let front = parse_cards("As Ks 2c 7d 8h 9c Qs Js Ts 3h 4d").unwrap();
+        let mut deck = fresh_deck();
+        let mut used = [false; 52];
+        for (i, &c) in front.iter().enumerate() {
+            deck[i] = c;
+            used[c as usize] = true;
+        }
+        let mut idx = front.len();
+        for c in 0..52u8 {
+            if !used[c as usize] {
+                deck[idx] = c;
+                idx += 1;
+            }
+        }
+        let hand_cfg = HandConfig {
+            num_players: 3,
+            stack: 2_000,
+            sb: 50,
+            bb: 100,
+        };
+        // Finer river buckets than the 2-player test: against the
+        // resolved (strong) shoving range, a coarse top bucket mixes the
+        // nuts with hands that should fold.
+        let abs = Arc::new(Abstraction::new(AbsConfig {
+            postflop_buckets: 30,
+            equity_rollouts: 50,
+            cache_cap: 100_000,
+            ..AbsConfig::default()
+        }));
+        let policy = Policy::new(
+            Blueprint {
+                strategies: Default::default(),
+                iterations: 0,
+                num_players: 3,
+                abs_cfg: AbsConfig::default(),
+                centroids: None,
+            },
+            abs.clone(),
+        );
+        let mut table = Table::new(&hand_cfg, 0, deck);
+        let mut tracker = RangeTracker::new(3);
+        // p0 calls, p1 calls, p2 checks; checked around to the river.
+        for _ in 0..3 {
+            table.apply_abs(AbsAction::CheckCall, &abs);
+        }
+        tracker.exclude(table.real.board());
+        for _ in 0..2 {
+            for _ in 0..3 {
+                table.apply_abs(AbsAction::CheckCall, &abs);
+            }
+            tracker.exclude(table.real.board());
+        }
+        assert_eq!(table.real.street(), Street::River);
+        assert_eq!(table.real.to_act(), 1);
+        table.apply_abs(AbsAction::AllIn, &abs); // p1 shoves
+        table.apply_abs(AbsAction::CheckCall, &abs); // p2 calls
+        assert_eq!(table.real.to_act(), 0);
+        assert_eq!(table.real.live_count(), 3);
+        assert_eq!(table.round.actions.len(), 2);
+
+        let train_cfg = TrainConfig {
+            hand: hand_cfg,
+            prune_after: u64::MAX,
+            ..TrainConfig::default()
+        };
+        let params = SearchParams {
+            time_ms: 60_000,
+            max_iters: 40_000,
+            ..SearchParams::default()
+        };
+        let mut rng = SmallRng::seed_from_u64(3);
+        let (acts, probs) = policy.search_dist(
+            &table.real,
+            &table.shadow,
+            &table.hist,
+            params,
+            &train_cfg,
+            Some(&tracker),
+            None,
+            Some(&table.round),
+            &mut rng,
+        );
+        assert_eq!(acts, vec![AbsAction::Fold, AbsAction::CheckCall]);
+        assert!(probs[1] > 0.9, "must call with the nuts three-way, got {probs:?}");
     }
 
     /// Safe (gadget) river resolving end to end through act_with_search:
@@ -829,9 +961,11 @@ mod tests {
                 qre_lambda: None,
                 safe_resolve: true,
                 adaptive: false,
+                round_root: true,
             },
             &train_cfg,
             Some(&tracker),
+            None,
             None,
             &mut rng,
         );
@@ -903,9 +1037,11 @@ mod tests {
                     qre_lambda: None,
                     safe_resolve: safe,
                     adaptive: false,
+                    round_root: true,
                 },
                 &train_cfg,
                 Some(&tracker),
+                None,
                 None,
                 &mut rng,
             );
@@ -968,6 +1104,7 @@ mod tests {
             qre_lambda: None,
             safe_resolve: true,
             adaptive: false,
+            round_root: true,
         };
         let mut table = Table::new(&hand_cfg, 0, deck);
         for _ in 0..4 {
@@ -990,6 +1127,7 @@ mod tests {
             &train_cfg,
             Some(&tracker),
             Some(&mut session),
+            None,
             &mut rng,
         );
         assert!(session.carry.is_some(), "turn resolve must store the carry");
@@ -1041,6 +1179,7 @@ mod tests {
             &train_cfg,
             Some(&tracker),
             Some(&mut session),
+            None,
             &mut rng,
         );
         let menu = abs.abstract_actions(&table.real);
@@ -1097,6 +1236,7 @@ mod tests {
             qre_lambda: None,
             safe_resolve: true,
             adaptive: false,
+            round_root: true,
         };
         let mut table = Table::new(&hand_cfg, 0, deck);
         table.apply_abs(AbsAction::CheckCall, &abs);
@@ -1111,6 +1251,7 @@ mod tests {
             params,
             &train_cfg,
             Some(&tracker),
+            None,
             None,
             &mut rng,
         );
@@ -1204,6 +1345,7 @@ mod tests {
             qre_lambda: None,
             safe_resolve: false,
             adaptive: false,
+            round_root: true,
         };
         // EV of calling 800 real: .42(+900) - .58(900) = -144 < fold -100.
         let mut rng = SmallRng::seed_from_u64(9);
@@ -1214,6 +1356,7 @@ mod tests {
             params,
             &train_cfg,
             Some(&tracker),
+            None,
             None,
             &mut rng,
         );
@@ -1229,6 +1372,7 @@ mod tests {
             params,
             &train_cfg,
             Some(&tracker),
+            None,
             None,
             &mut rng,
         );
@@ -1289,12 +1433,14 @@ mod tests {
                 qre_lambda: None,
                 safe_resolve: false,
                 adaptive: false,
+                round_root: true,
             },
             Some(&tracker),
             Some(LeafCfg {
                 blueprint: bp.clone(),
                 limit: Street::Flop,
             }),
+        None,
         );
         assert!(solver.node_count() > 0, "search must create infosets");
         let p = h.to_act();
