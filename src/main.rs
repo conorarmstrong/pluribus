@@ -207,6 +207,9 @@ enum Cmd {
         /// Per-decision search budget in milliseconds (with --search).
         #[arg(long, default_value_t = 100)]
         search_ms: u64,
+        /// Per-decision search iteration cap (with --search).
+        #[arg(long, default_value_t = 2_000_000)]
+        search_iters: u64,
         /// Belief-state value net for ReBeL flop solving (with --search).
         #[arg(long)]
         value_net: Option<String>,
@@ -689,6 +692,7 @@ fn main() {
             search_gain,
             net_gain,
             search_ms,
+            search_iters,
             value_net,
             strat_prev,
             seed,
@@ -727,6 +731,7 @@ fn main() {
             let started = std::time::Instant::now();
             let params = SearchParams {
                 time_ms: search_ms,
+                max_iters: search_iters,
                 adaptive: true,
                 ..SearchParams::default()
             };
