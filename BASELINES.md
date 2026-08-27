@@ -1043,3 +1043,33 @@ sample-starvation cost. Revisit only with a much larger per-decision
 budget or a different way of sharing statistics across buckets. Search
 timing was 30 min per 10k hands at both bucket counts once the machine
 was uncontended.
+
+### A3 heads-up check: `br --search` (27 Aug 2026)
+
+Paired `br --hands 20000` seeds 1-8, blueprint vs the bot searching
+(`--search --search-iters 20000`; heads-up turns/rivers use the exact
+solvers, flop plays the blueprint). The probe's best response is computed
+against the *blueprint's* strategy, so against the searching bot it is
+no longer a best response: the search column is a probe result, not an
+exploitability bound.
+
+| Seed | blueprint | search |
+|------|-----------|--------|
+| 1 | +40.1 | −359.1 |
+| 2 | +78.6 | −321.9 |
+| 3 | +154.8 | −203.2 |
+| 4 | +192.8 | −198.6 |
+| 5 | +106.8 | −311.0 |
+| 6 | +256.3 | −108.2 |
+| 7 | +91.0 | −276.9 |
+| 8 | +125.0 | −213.7 |
+| **mean** | **+130.7** | **−249.1** |
+
+Paired: search − blueprint **−379.8 ±22.2** (t=40), 8/8. The
+blueprint-modelled exploiter goes from winning +131 to losing −249
+against the searching bot. VERDICT: heads-up play does not worsen with
+search on (the ROADMAP A3 gate's "neither probe worsens" condition
+holds); the tightness is the paired-deal design, not evidence about
+the true exploitability of the searching bot, which needs an exploiter
+that models the searched strategy (open item). ~18 min per 20k-hand
+seed.
