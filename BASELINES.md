@@ -1142,3 +1142,16 @@ spine sampling, whose gate arm is being re-measured). Implication for
 the multiway leak: it is not a matter of *redistributing* a fixed
 budget; the budget itself has to grow (A4, rented compute), or the
 per-traversal cost of multiway lines has to fall.
+
+### A3 addendum: round-rooted search re-measured after the off-policy fix (28 Aug 2026)
+
+Same 8 seeds, 10k hands, 20k iters as the A3 gate, round-rooted search
+with the corrected spine sampling (55625c4: returned values scaled by
+sigma/q). Per seed: +893.8, +709.0, +1247.9, +1103.7, +1244.3, +560.7,
++652.4, +948.7; mean **+920.1**.
+
+Paired: corrected round − blueprint **−166.2 ±148.1** (t=2.7), 7/8;
+corrected round − decision-rooted +19.9 ±83.0 (4/8); corrected − biased
+round +33.5 ±56.4 (4/8). VERDICT unchanged: search beats the blueprint;
+round-start rooting is indistinguishable from decision rooting, before
+and after the fix. The A3 record stands with search as the gain.
