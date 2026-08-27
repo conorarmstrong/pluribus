@@ -971,3 +971,47 @@ the multiway bound (+929) has not moved and is the target from here
 Test note: `cfr::tests::push_fold_convergence` (32o fold > 0.6 at 80k
 iterations) failed once in a full-suite run under machine load and passes
 3/3 in isolation; a pre-existing threshold sensitivity, not the menu.
+
+### A3 gate: online search in multiway pots (26-27 Aug 2026)
+
+`lbr --multiway --hands 10000` seeds 1-8, standing blueprint
+`blueprint_plu200.bin`, three arms per seed: raw blueprint; the bot
+searching every postflop decision rooted at the current decision
+(`--search --search-iters 20000 --decision-root`, the pre-A3 resolver);
+the same rooted at the start of the betting round (`--search
+--search-iters 20000`, commit 66d272b: spine, fixed hero actions,
+round-start ranges, eps-0.5 importance-weighted spine sampling). The
+bot's card abstraction inside the resolve is the blueprint's 12 buckets.
+Iteration-capped, so the numbers are independent of machine load;
+~36 min per search arm per seed. The LBR's range model of the bot stays
+the blueprint, so the search arms are probe results, not strict bounds.
+
+| Seed | blueprint | search, decision-rooted | search, round-rooted |
+|------|-----------|-------------------------|----------------------|
+| 1 | +926.2 | +776.4 | +803.0 |
+| 2 | +846.6 | +762.0 | +742.3 |
+| 3 | +1063.8 | +1035.8 | +1090.5 |
+| 4 | +1315.7 | +1176.5 | +1131.7 |
+| 5 | +1546.5 | +1226.8 | +1218.2 |
+| 6 | +785.3 | +625.2 | +571.8 |
+| 7 | +1047.6 | +672.0 | +581.2 |
+| 8 | +1158.8 | +927.7 | +954.7 |
+| **mean** | **+1086.3** | **+900.3** | **+886.7** |
+
+Paired by seed (95% CI, df=7):
+- decision-rooted search − blueprint: **−186.0 ±97.6** (t=4.5), 8/8
+- round-rooted search − blueprint: **−199.6 ±124.2** (t=3.8), 7/8
+- round-rooted − decision-rooted: −13.6 ±40.6 (t=0.8), 5/8
+
+VERDICT: searching multiway decisions cuts the multiway leak by about
+17% and does so on every seed; that is the first movement of the
+multiway bound. Round-start rooting is not distinguishable from
+decision rooting at this budget and abstraction (it stays the default
+as Pluribus's design and because it is not worse, but it is not the
+gain). Note the per-seed blueprint bound varies +785..+1547 with
+10k-hand CIs of ±430-470; the 20k seed-1 figure (+929) remains the
+quoted standing number. Roughly +890 of leak remains with search on.
+Next lever, queued: finer card abstraction inside the resolve
+(`--search-buckets 200`, commit b47d280), which the unit test showed
+matters (a 6-bucket "nuts" class folds 18% against the re-solved
+shove range).
