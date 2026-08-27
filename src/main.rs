@@ -148,9 +148,14 @@ enum Cmd {
         blueprint: String,
         #[arg(long, default_value_t = 6)]
         players: usize,
-        /// Enable online subgame resolving for the bots' postflop decisions.
-        #[arg(long)]
+        /// Online subgame resolving for the bots' postflop decisions is
+        /// on by default (A3 gate, Aug 2026); this flag is kept for
+        /// scripts and is a no-op.
+        #[arg(long, hide = true)]
         search: bool,
+        /// Bots play the raw blueprint (no online resolving).
+        #[arg(long)]
+        no_search: bool,
         /// Time budget per searched decision, in milliseconds.
         #[arg(long, default_value_t = 2_000)]
         search_ms: u64,
@@ -650,6 +655,7 @@ fn main() {
             blueprint,
             players,
             search,
+            no_search,
             search_ms,
             qre_lambda,
             value_net,
@@ -669,7 +675,7 @@ fn main() {
                     num_players: players,
                     ..HandConfig::default()
                 },
-                search: search.then_some(SearchParams {
+                search: (search || !no_search).then_some(SearchParams {
                     time_ms: search_ms,
                     qre_lambda,
                     safe_resolve,

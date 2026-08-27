@@ -162,8 +162,12 @@ setting depends on budget. Either answer is worth having before renting
 hardware.
 
 **A3. Search on every postflop decision, multiway.** *The biggest single
-gap. Weeks.* **Status 26 Aug: round-start rooting built (commit 66d272b),
-`lbr --multiway --search` and `br --search` built; 8-seed gate running.**
+gap. Weeks.* **Status 27 Aug: gate PASSED for search itself: multiway LBR −186 ±98
+(8/8), heads-up `br` not worse (8/8), search-gain +125 ±40 at 200k.
+Search is the `play` default. Round-start rooting: neutral (−14 ±41,
+kept as default). 200 in-subgame buckets: worse (+91 ±50, 8/8), closed
+at this budget. ~+900 multiway leak remains; next is to find whether it
+is compute (falling with iterations) or abstraction (flat).**
 Today `search_dist` (`src/bot.rs`) hands any spot with three or more live
 players to `resolve_subgame`: sampled MCCFR from the current decision
 point, hidden cards sampled from the tracker, flop depth-limited with the
@@ -337,8 +341,10 @@ the bot is not embarrassing.
 ### Sequencing
 
 ```
-done     A0 probe, A1 menu (adopted), A2 wall-clock check
-next     A3 multiway search, gated by A0 --search   <- the +929 lives here
+done     A0 probe, A1 menu (adopted), A2 wall-clock check,
+         A3 multiway search (adopted: -186 multiway, HU not worse)
+next     A3b: is the remaining +900 compute or abstraction? (probe the
+         multiway bound at 200M checkpoints; if still falling, rent)
          B2 step 1 (RNR exploiter vs Slumbot), A5 audit items (cheap)
 then     B2 steps 2-3 (stats prior, per-seat arms), B1 net leaves,
          C2 Pluribus clone (parallel)

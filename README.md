@@ -26,8 +26,8 @@ cargo build --release
 # Train a blueprint (200M iterations ≈ 1 hour on 16 cores)
 ./target/release/pluribus train --iters 200000000 --out blueprint.bin
 
-# Play against the bots (you are seat 0); --search enables online resolving
-./target/release/pluribus play --blueprint blueprint.bin --search
+# Play against the bots (you are seat 0); online resolving is on by default
+./target/release/pluribus play --blueprint blueprint.bin
 
 # Measure winrate vs baseline opponents (--aivat / --duplicate reduce variance)
 ./target/release/pluribus eval --blueprint blueprint.bin --hands 200000 --baseline random
@@ -671,7 +671,19 @@ the July reference (+472) on the heads-up line.
 `lbr --multiway` (built 25 Aug) puts the same standing blueprint at
 **+929 ±319 mbb/hand** in real multiway pots, with only 0.1% of decisions
 on untrained infosets: trained, wrong multiway play, unchanged by either
-fix. That is the open target (ROADMAP A3). Two side findings: the wide bet
+fix. That is the open target (ROADMAP A3).
+
+**A3: online search in multiway pots (26-27 Aug).** Resolving every
+postflop decision (20k traversals, ~0.2 s) cuts the multiway leak by
+**−186 ±98 mbb/hand** (8/8 seeds, 10k hands each; blueprint mean +1086,
+searching +900), does not worsen the heads-up line (paired `br`, 8/8:
+the blueprint-modelled exploiter goes from +131 to −249 against the
+searching bot), and wins **+125 ±40** in paired self-play
+(`eval --search-gain`, 200k deals). Search is therefore on by default in
+`play`. Two variants were closed: round-start rooting is indistinguishable
+from decision rooting (−14 ±41), and 200 in-subgame card buckets are worse
+than 12 at this budget (+91 ±50, 8/8). Roughly +900 of multiway leak
+remains with search on; see BASELINES.md. Two side findings: the wide bet
 menu on its own does nothing (plain 200M wide-menu +501 vs narrow-menu
 +472), and Pluribus pruning costs 2.4× per iteration at 200M (67 vs 28
 min; 402M vs 306M infosets), so the equal-wall-clock comparison is still

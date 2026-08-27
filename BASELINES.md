@@ -1073,3 +1073,17 @@ holds); the tightness is the paired-deal design, not evidence about
 the true exploitability of the searching bot, which needs an exploiter
 that models the searched strategy (open item). ~18 min per 20k-hand
 seed.
+
+### A3 search-gain and verdict (27 Aug 2026)
+
+`eval --search-gain --search-iters 20000` (hero searching vs hero on the
+blueprint, everyone else blueprint, paired deals): 40k deals **+58.7
+±99.7** (17 min), 200k deals **+125.1 ±40.2** (83 min). CI clear of
+zero.
+
+A3 GATE: multiway LBR −186 ±98 (8/8) and −200 ±124 (7/8); heads-up `br`
+not worse (8/8); search-gain +125 ±40. All three conditions hold.
+ADOPTED: online search is the `play` default (`--no-search` restores
+the raw blueprint). The probes keep search opt-in (`--search`) so the
+blueprint's own bounds stay the quoted standing numbers. Closed: round
+vs decision rooting (neutral), 200 in-subgame buckets (worse).
