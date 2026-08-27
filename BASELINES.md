@@ -1087,3 +1087,27 @@ ADOPTED: online search is the `play` default (`--no-search` restores
 the raw blueprint). The probes keep search opt-in (`--search`) so the
 blueprint's own bounds stay the quoted standing numbers. Closed: round
 vs decision rooting (neutral), 200 in-subgame buckets (worse).
+
+### A3b: is the multiway leak compute or abstraction? COMPUTE (27 Aug 2026)
+
+One training run (`--train-seed 0`, defaults) checkpointed at 25/50/100/
+200M via `--checkpoint`/`--resume` (`--iters` is additional on resume),
+probed at each stage: `lbr --multiway --hands 20000` seeds 1-2 and
+`br --hands 20000` seed 1.
+
+| Iterations | infosets | multiway LBR s1 | s2 | mean | heads-up BR s1 |
+|-----------:|---------:|----------------:|---:|-----:|---------------:|
+| 25M | 60.5M | +2526.8 | +2433.1 | +2480 | +723.5 |
+| 50M | 79.1M | +1780.9 | +1900.4 | +1841 | +225.9 |
+| 100M | 99.8M | +1464.0 | +1536.3 | +1500 | +34.5 |
+| 200M | 121.1M | +1003.8 | +854.8 | +929 | +48.3 |
+
+The heads-up line converges by 100M (+35, +48; standing +39) and stops.
+The multiway bound is still falling at every doubling (−640, −340, −570
+per doubling) with no sign of a floor at 200M. Training time 37 min for
+the 200M total. VERDICT: the remaining multiway leak is under-training
+of multiway lines (most traversals fold to heads-up before a multiway
+pot), not the card abstraction. Next: multiway-focused training
+(steer traversals toward multiway lines, importance-weighted so the
+fixed point is unchanged) on this machine; fallback, a longer run on
+rented hardware (A4).
