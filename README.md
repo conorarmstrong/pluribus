@@ -76,6 +76,7 @@ training exactly.
 | `--rollouts` | 200 | MC rollouts per river equity estimate |
 | `--runouts` | 24 | Sampled future boards per flop/turn distribution |
 | `--kmeans-samples` | 30,000 | Situations sampled per street for clustering |
+| `--bucket-table` | – | Preloaded flop/turn bucket table from `bucket-table` (2.7x faster training, identical buckets) |
 | `--raw-buckets` | off | Plain equity quantization instead of k-means |
 | `--ochs` | off | Potential-aware OCHS card abstraction: equity quantiles concatenated with the hand's equity against 8 preflop opponent tiers |
 | `--strategic-from <file>` | – | Co-train: cluster by a previous blueprint's play instead of equity |
@@ -88,6 +89,24 @@ training exactly.
 | `--snapshot-avg` | off | Postflop blueprint = mean of periodic snapshots of the current strategy (after a 10% warm-up, every 5%) instead of the linear running average; preflop keeps the average |
 | `--vr-baseline` | off | VR-MCCFR learned control-variate baselines at sampled opponent nodes; unbiased variance reduction per visit |
 | `--threads` | all cores | Worker threads |
+
+### `bucket-table`
+Precomputes the card bucket of every suit-canonical (hole, board) pair on
+the flop and turn (15.2M entries, 152 MB, ~3 minutes on 16 cores) for the
+default EMD k-means abstraction and stores it with its centroids:
+
+```bash
+./target/release/pluribus bucket-table --out buckets.bin
+./target/release/pluribus train --iters 200000000 --bucket-table buckets.bin
+```
+
+Profiling showed ~70% of training time in Monte Carlo equity rollouts on
+bucket-cache misses; with the table preloaded the trainer runs 2.7x faster
+(248k vs 92k traversals/s on 16 cores) and every bucket value is exactly
+what the lazy path would have computed (rollouts are seeded from the
+canonical key; centroids are deterministic per seed). Flags `--buckets`,
+`--rollouts`, `--runouts`, `--kmeans-samples` must match the training run;
+`train` refuses a mismatched table.
 
 ### `play`
 Interactive terminal game: you (seat 0) vs bots. Stacks reset every hand
@@ -759,7 +778,12 @@ experiments (all reproducible from the CLI):
   7-card hand.
 - Distribution bucketing is ~6× the cost of raw equity per cache miss, but
   results are memoized in a collision-free packed-key cache shared between
-  training, play, and search.
+  training, play, and search. Those misses were ~70% of training time
+  (profiled 28 Aug 2026); `bucket-table` precomputes every canonical
+  flop/turn bucket once and `train --bucket-table` preloads it: 2.7x.
+- Removing the traversal's per-node heap allocations measured 0%: with
+  mimalloc they are not the bottleneck. CFR traversal plus the strategy
+  map is under 5% of the profile.
 - The `eval` harness plays hundreds of thousands of hands per second; the
   PHH benchmark replays all 10,000 Pluribus hands in under a second.
 

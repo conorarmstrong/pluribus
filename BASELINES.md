@@ -1155,3 +1155,14 @@ corrected round − decision-rooted +19.9 ±83.0 (4/8); corrected − biased
 round +33.5 ±56.4 (4/8). VERDICT unchanged: search beats the blueprint;
 round-start rooting is indistinguishable from decision rooting, before
 and after the fix. The A3 record stands with search as the gain.
+
+### Trainer speed: bucket table (28 Aug 2026)
+
+macOS `sample` profile of `train` (10 s, 16 threads): 68% of samples in
+`eval::eval_hole_board` under `Abstraction::bucket -> equity_quantiles`
+(flop/turn bucket-cache misses); `Trainer::traverse` 3%, DashMap < 1%.
+Removing per-visit heap allocations in `traverse`: 92,630 -> 92,028
+iters/s (no change). `bucket-table` (15,246,842 canonical flop/turn
+pairs, 173 s to build, 152 MB) preloaded via `train --bucket-table`:
+**248,660 iters/s vs 92,630** on 10M iterations, same machine load
+(2.7x). Bucket values identical to the lazy path by construction.
