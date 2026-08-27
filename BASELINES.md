@@ -1015,3 +1015,31 @@ Next lever, queued: finer card abstraction inside the resolve
 (`--search-buckets 200`, commit b47d280), which the unit test showed
 matters (a 6-bucket "nuts" class folds 18% against the re-solved
 shove range).
+
+### A3 lever: finer card abstraction inside the resolve — NEGATIVE (27 Aug 2026)
+
+Same 8 seeds and budget as the gate above, round-rooted search with
+`--search-buckets 200` (equity quantiles, exact per-board river tables;
+blueprint lookups keep 12), commit b47d280.
+
+| Seed | round-rooted, 12 buckets | round-rooted, 200 buckets |
+|------|--------------------------|---------------------------|
+| 1 | +803.0 | +847.8 |
+| 2 | +742.3 | +795.8 |
+| 3 | +1090.5 | +1138.3 |
+| 4 | +1131.7 | +1311.4 |
+| 5 | +1218.2 | +1265.7 |
+| 6 | +571.8 | +746.4 |
+| 7 | +581.2 | +712.9 |
+| 8 | +954.7 | +1005.9 |
+| **mean** | **+886.7** | **+978.0** |
+
+Paired: 200 − 12 buckets **+91.3 ±50.4** (t=4.3), worse on 8/8; 200
+buckets − blueprint −108.3 ±116.7 (7/8), so it keeps roughly half of
+the search gain. VERDICT: closed at this budget. 20k traversals spread
+over ~17x more infosets leave each one under-trained; the unit-test
+effect (coarse "nuts" class hedging) is real but smaller than the
+sample-starvation cost. Revisit only with a much larger per-decision
+budget or a different way of sharing statistics across buckets. Search
+timing was 30 min per 10k hands at both bucket counts once the machine
+was uncontended.
