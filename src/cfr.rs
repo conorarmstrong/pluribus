@@ -60,10 +60,10 @@ pub struct TrainConfig {
     /// carries residual mass on.
     pub snapshot_avg: bool,
     /// Multiway-focused sampling: at a non-traverser's preflop node the
-    /// action is drawn from (1-f)*sigma + f*uniform-over-non-fold and the
-    /// traversal's weight is multiplied by sigma/q, so multiway lines are
-    /// reached more often while every update stays unbiased (the
-    /// fixed point is unchanged). 0 = plain external sampling.
+    /// action is drawn from (1-f)*sigma + f*(sigma renormalised over
+    /// non-fold actions) and every update is importance-weighted by
+    /// sigma/q, so multiway lines are reached more often while the
+    /// fixed point is unchanged. 0 = plain external sampling.
     pub multiway_focus: f64,
 }
 
@@ -587,22 +587,27 @@ impl Trainer {
                     let q = (1.0 - SPINE_EPS) * dist[idx] + if idx == si { SPINE_EPS } else { 0.0 };
                     (idx, dist[idx] / q)
                 }
-                _ if self.cfg.multiway_focus > 0.0 && h.street() == Street::Preflop => {
-                    // Multiway focus: mix toward non-fold actions,
-                    // importance-weighted (see TrainConfig::multiway_focus).
+                _ if self.cfg.multiway_focus > 0.0
+                    && h.street() == Street::Preflop
+                    && acts[0] == AbsAction::Fold
+                    && dist[0] < 1.0 =>
+                {
+                    // Multiway focus (fold suppression): q = (1-f)*sigma +
+                    // f*sigma_nonfold, where sigma_nonfold is sigma
+                    // renormalised over the non-fold actions. Never samples
+                    // an action sigma gives zero mass (no wasted
+                    // traversals) and keeps sigma/q within
+                    // [1/(1-f+f/(1-p_fold)), 1/(1-f)]. Fold is always
+                    // index 0 when legal.
                     let f = self.cfg.multiway_focus;
-                    let live: Vec<usize> = (0..acts.len())
-                        .filter(|&i| acts[i] != AbsAction::Fold)
+                    let z = 1.0 - dist[0];
+                    let q: Vec<f64> = dist
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &d)| (1.0 - f) * d + if i == 0 { 0.0 } else { f * d / z })
                         .collect();
-                    let u = 1.0 / live.len() as f64;
-                    let idx = if rng.random::<f64>() < f {
-                        live[rng.random_range(0..live.len())]
-                    } else {
-                        sample_index(&dist, rng)
-                    };
-                    let q = (1.0 - f) * dist[idx]
-                        + if acts[idx] != AbsAction::Fold { f * u } else { 0.0 };
-                    (idx, dist[idx] / q)
+                    let idx = sample_index(&q, rng);
+                    (idx, dist[idx] / q[idx])
                 }
                 _ => (sample_index(&dist, rng), 1.0),
             };

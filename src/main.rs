@@ -139,9 +139,10 @@ enum Cmd {
         #[arg(long)]
         snapshot_avg: bool,
         /// Multiway-focused sampling weight f in [0,1): opponents' preflop
-        /// actions are drawn from (1-f)*strategy + f*uniform-over-non-fold,
-        /// importance-weighted so the equilibrium is unchanged; multiway
-        /// lines get trained more per iteration. 0 = off.
+        /// folds are suppressed (actions drawn from (1-f)*strategy +
+        /// f*strategy-renormalised-over-non-fold), importance-weighted so
+        /// the equilibrium is unchanged; multiway lines get trained more
+        /// per iteration. 0 = off.
         #[arg(long, default_value_t = 0.0)]
         multiway_focus: f64,
         /// Worker threads (default: all cores).
