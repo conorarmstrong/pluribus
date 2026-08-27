@@ -571,7 +571,13 @@ impl Trainer {
                 }
             }
             // Spine-targeted sampling at an opponent's spine node.
-            let (idx, weight) = match step {
+            // Off-policy sampling (spine targeting, multiway focus) draws
+            // the action from q instead of sigma. Two corrections keep
+            // every update unbiased: descendants' updates carry the reach
+            // ratio sigma/q in `weight`, and the value returned to the
+            // ancestors is scaled by the same ratio (E_q[ratio * v] =
+            // E_sigma[v]).
+            let (idx, ratio) = match step {
                 Some((si, _, false)) => {
                     let idx = if rng.random::<f64>() < SPINE_EPS {
                         si
@@ -579,7 +585,7 @@ impl Trainer {
                         sample_index(&dist, rng)
                     };
                     let q = (1.0 - SPINE_EPS) * dist[idx] + if idx == si { SPINE_EPS } else { 0.0 };
-                    (idx, weight * dist[idx] / q)
+                    (idx, dist[idx] / q)
                 }
                 _ if self.cfg.multiway_focus > 0.0 && h.street() == Street::Preflop => {
                     // Multiway focus: mix toward non-fold actions,
@@ -596,10 +602,11 @@ impl Trainer {
                     };
                     let q = (1.0 - f) * dist[idx]
                         + if acts[idx] != AbsAction::Fold { f * u } else { 0.0 };
-                    (idx, weight * dist[idx] / q)
+                    (idx, dist[idx] / q)
                 }
-                _ => (sample_index(&dist, rng), weight),
+                _ => (sample_index(&dist, rng), 1.0),
             };
+            let weight = weight * ratio;
             let a = acts[idx];
             let mut child = h.clone();
             child.apply(self.child_action(h, a, idx, step));
@@ -608,7 +615,7 @@ impl Trainer {
                 hist.push(TOKEN_STREET_SEP);
             }
             // No truncation needed: the nearest traverser ancestor restores hist.
-            let v = self.traverse(&child, hist, traverser, weight, prune_ok, model_opp, rng);
+            let v = ratio * self.traverse(&child, hist, traverser, weight, prune_ok, model_opp, rng);
             if !self.vr {
                 return v;
             }
@@ -1264,7 +1271,7 @@ mod tests {
     fn multiway_focus_keeps_the_fixed_point() {
         let mut t = push_fold_trainer();
         t.cfg.multiway_focus = 0.6;
-        t.run(60_000, &|_| {});
+        t.run(120_000, &|_| {}); // importance weights add variance: extra margin
         let aa = preflop_bucket([make_card(12, 0), make_card(12, 1)]);
         let shove_hist = [AbsAction::AllIn.token()];
         let aa_call = t.avg_strategy(aa, &shove_hist).expect("AA-vs-shove visited");
