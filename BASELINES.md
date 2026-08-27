@@ -1111,3 +1111,34 @@ pot), not the card abstraction. Next: multiway-focused training
 (steer traversals toward multiway lines, importance-weighted so the
 fixed point is unchanged) on this machine; fallback, a longer run on
 rented hardware (A4).
+
+### Multiway-focused training — NEGATIVE (27 Aug 2026)
+
+`train --iters 30000000 --train-seed 0 --multiway-focus 0.3` (commit
+5f9ac2c: opponents' preflop folds suppressed at sampling time, every
+update importance-weighted by sigma/q, fixed point unchanged; unit test
+`multiway_focus_keeps_the_fixed_point`) vs the plain 30M arm, paired
+`lbr --multiway` and `br` at 20k hands, seeds 1-8.
+
+| Probe | plain mean | focus 0.3 mean | paired focus − plain |
+|-------|-----------:|---------------:|---------------------:|
+| multiway LBR | +2638 | +2528 | **−111 ±156** (t=1.7), 6/8 |
+| heads-up BR | +698 | +1232 | **+534 ±213** (t=5.9), worse 8/8 |
+
+Per seed (plain/focus), multiway: +2650/+2513, +2762/+2666, +2772/+2573,
++2415/+2597, +2549/+2566, +2767/+2298, +2583/+2450, +2607/+2557.
+Heads-up: +469/+1380, +403/+1056, +609/+804, +414/+1240, +802/+1272,
++814/+1268, +1218/+1459, +859/+1380.
+
+VERDICT: closed. At a fixed traversal budget, steering samples from
+fold-to-the-blinds lines toward multiway lines buys a small, unproven
+multiway gain (−4%) and costs the heads-up line 76%: four suppressed
+folds sample the heads-up lines ~4x less often. Two earlier variants
+were worse still: a uniform-over-non-fold mixture wasted ~30% of samples
+on zero-probability actions, and an implementation that weighted
+descendants but did not scale the value returned to ancestors was
+biased (fixed in 55625c4; the same flaw was in the round-rooted search's
+spine sampling, whose gate arm is being re-measured). Implication for
+the multiway leak: it is not a matter of *redistributing* a fixed
+budget; the budget itself has to grow (A4, rented compute), or the
+per-traversal cost of multiway lines has to fall.
