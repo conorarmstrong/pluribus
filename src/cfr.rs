@@ -227,13 +227,28 @@ pub(crate) fn qre_distribution(regrets: &[f64], lambda: f64, out: &mut Vec<f64>)
 /// sigma = positive-regret matching; uniform when no positive regret.
 pub fn regret_matching(regrets: &[f64], out: &mut Vec<f64>) {
     out.clear();
+    out.resize(regrets.len(), 0.0);
+    regret_matching_into(regrets, out);
+}
+
+/// Regret matching into a caller-provided slice (no allocation).
+fn regret_matching_into(regrets: &[f64], out: &mut [f64]) {
     let total: f64 = regrets.iter().map(|&r| r.max(0.0)).sum();
     if total > 0.0 {
-        out.extend(regrets.iter().map(|&r| r.max(0.0) / total));
+        for (o, &r) in out.iter_mut().zip(regrets) {
+            *o = r.max(0.0) / total;
+        }
     } else {
-        out.extend(std::iter::repeat_n(1.0 / regrets.len() as f64, regrets.len()));
+        out.fill(1.0 / regrets.len() as f64);
     }
 }
+
+/// Upper bound on the action menu size, for stack buffers in the
+/// traversal (fold, check/call, up to 8 bet sizes, all-in).
+const MAX_ACTS: usize = 16;
+/// Stack buffer for an infoset key; histories longer than this fall back
+/// to a heap key.
+const KEY_BUF: usize = 96;
 
 pub fn make_key(bucket: u16, hist: &[u8]) -> InfoKey {
     let mut k = Vec::with_capacity(2 + hist.len());
@@ -434,19 +449,44 @@ impl Trainer {
         }
         let p = h.to_act();
         let acts = self.abs.abstract_actions(h);
+        let n = acts.len();
+        debug_assert!(n <= MAX_ACTS);
         let bucket = self.abs.bucket(h.hole(p), h.board(), rng);
-        let key = make_key(bucket, hist);
+        // Key built on the stack; the map is queried by slice and a heap
+        // key is allocated only on the infoset's first visit.
+        let mut kbuf = [0u8; KEY_BUF];
+        let heap_key;
+        let key: &[u8] = if hist.len() + 2 <= KEY_BUF {
+            kbuf[0] = bucket as u8;
+            kbuf[1] = (bucket >> 8) as u8;
+            kbuf[2..2 + hist.len()].copy_from_slice(hist);
+            &kbuf[..2 + hist.len()]
+        } else {
+            heap_key = make_key(bucket, hist);
+            &heap_key
+        };
 
         // Snapshot sigma without holding the shard lock during recursion.
-        let (sigma, regrets) = {
-            let node = self.nodes.entry(key.clone()).or_insert_with(|| Node {
-                regret: vec![0.0; acts.len()],
-                strat: vec![0.0; acts.len()],
-            });
-            let mut s = Vec::with_capacity(acts.len());
-            regret_matching(&node.regret, &mut s);
-            (s, node.regret.clone())
-        };
+        let mut sigma_buf = [0.0f64; MAX_ACTS];
+        let mut regrets_buf = [0.0f64; MAX_ACTS];
+        {
+            let snapshot = |node: &Node, sb: &mut [f64], rb: &mut [f64]| {
+                regret_matching_into(&node.regret, sb);
+                rb.copy_from_slice(&node.regret);
+            };
+            match self.nodes.get(key) {
+                Some(node) => snapshot(&node, &mut sigma_buf[..n], &mut regrets_buf[..n]),
+                None => {
+                    let node = self.nodes.entry(InfoKey::from(key)).or_insert_with(|| Node {
+                        regret: vec![0.0; n],
+                        strat: vec![0.0; n],
+                    });
+                    snapshot(&node, &mut sigma_buf[..n], &mut regrets_buf[..n]);
+                }
+            }
+        }
+        let sigma = &sigma_buf[..n];
+        let regrets = &regrets_buf[..n];
 
         let step = self.spine.as_ref().and_then(|sp| sp.step_at(hist, h, &acts));
         if let Some((si, real, true)) = step {
@@ -467,17 +507,14 @@ impl Trainer {
         if p == traverser {
             // Full-width over own actions, with negative-regret pruning.
             let pluribus = self.cfg.pluribus_prune;
-            let mut explore: Vec<bool> = if prune_ok && !(pluribus && h.street() == Street::River) {
-                regrets
-                    .iter()
-                    .map(|&r| {
-                        r >= self.cfg.prune_threshold
-                            || (!pluribus && rng.random::<f64>() >= self.cfg.prune_prob)
-                    })
-                    .collect()
-            } else {
-                vec![true; acts.len()]
-            };
+            let mut explore = [true; MAX_ACTS];
+            if prune_ok && !(pluribus && h.street() == Street::River) {
+                for (e, &r) in explore.iter_mut().zip(regrets) {
+                    *e = r >= self.cfg.prune_threshold
+                        || (!pluribus && rng.random::<f64>() >= self.cfg.prune_prob);
+                }
+            }
+            let explore = &mut explore[..n];
             let mut children: Vec<Hand> = Vec::with_capacity(acts.len());
             for (i, &a) in acts.iter().enumerate() {
                 let mut child = h.clone();
@@ -491,7 +528,7 @@ impl Trainer {
                 explore.iter_mut().for_each(|e| *e = true);
             }
 
-            let mut utils = vec![0.0f64; acts.len()];
+            let mut utils = [0.0f64; MAX_ACTS];
             let mut node_util = 0.0;
             for (i, &a) in acts.iter().enumerate() {
                 if !explore[i] {
@@ -509,7 +546,7 @@ impl Trainer {
                 node_util += sigma[i] * utils[i];
             }
 
-            if let Some(mut node) = self.nodes.get_mut(&key) {
+            if let Some(mut node) = self.nodes.get_mut(key) {
                 let floor = self.regret_floor();
                 for i in 0..acts.len() {
                     if explore[i] {
@@ -555,17 +592,19 @@ impl Trainer {
             // Sample one opponent action from their modeled strategy
             // (regret matching, or logit QRE when exploiting) and
             // accumulate it into their average strategy.
-            let dist = match self.qre_lambda {
+            let qre_buf;
+            let dist: &[f64] = match self.qre_lambda {
                 Some(l) => {
                     let mut q = Vec::with_capacity(regrets.len());
-                    qre_distribution(&regrets, l, &mut q);
-                    q
+                    qre_distribution(regrets, l, &mut q);
+                    qre_buf = q;
+                    &qre_buf
                 }
                 None => sigma,
             };
             if !(self.cfg.snapshot_avg && h.street() != Street::Preflop) {
-                if let Some(mut node) = self.nodes.get_mut(&key) {
-                    for (st, &d) in node.strat.iter_mut().zip(&dist) {
+                if let Some(mut node) = self.nodes.get_mut(key) {
+                    for (st, &d) in node.strat.iter_mut().zip(dist) {
                         *st += weight * d;
                     }
                 }
@@ -582,7 +621,7 @@ impl Trainer {
                     let idx = if rng.random::<f64>() < SPINE_EPS {
                         si
                     } else {
-                        sample_index(&dist, rng)
+                        sample_index(dist, rng)
                     };
                     let q = (1.0 - SPINE_EPS) * dist[idx] + if idx == si { SPINE_EPS } else { 0.0 };
                     (idx, dist[idx] / q)
@@ -609,7 +648,7 @@ impl Trainer {
                     let idx = sample_index(&q, rng);
                     (idx, dist[idx] / q[idx])
                 }
-                _ => (sample_index(&dist, rng), 1.0),
+                _ => (sample_index(dist, rng), 1.0),
             };
             let weight = weight * ratio;
             let a = acts[idx];
@@ -630,7 +669,7 @@ impl Trainer {
                 .baselines
                 .entry(bkey)
                 .or_insert_with(|| vec![0.0f32; acts.len()]);
-            let expected: f64 = b.iter().zip(&dist).map(|(&bi, &d)| bi as f64 * d).sum();
+            let expected: f64 = b.iter().zip(dist).map(|(&bi, &d)| bi as f64 * d).sum();
             let corrected = expected + (v - b[idx] as f64);
             b[idx] += BASELINE_ALPHA * (v as f32 - b[idx]);
             corrected

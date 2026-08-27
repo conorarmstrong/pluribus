@@ -85,6 +85,11 @@ enum Cmd {
         /// Sampled future boards per flop/turn distribution estimate.
         #[arg(long, default_value_t = 24)]
         runouts: u32,
+        /// Preloaded flop/turn bucket table from `bucket-table` (same
+        /// buckets/rollouts/runouts): skips centroid training and the
+        /// Monte Carlo bucketing that otherwise takes ~70% of training.
+        #[arg(long)]
+        bucket_table: Option<String>,
         /// Situations sampled per street when training k-means centroids.
         #[arg(long, default_value_t = 30_000)]
         kmeans_samples: usize,
@@ -146,6 +151,23 @@ enum Cmd {
         #[arg(long, default_value_t = 0.0)]
         multiway_focus: f64,
         /// Worker threads (default: all cores).
+        #[arg(long)]
+        threads: Option<usize>,
+    },
+    /// Precompute every canonical flop/turn card bucket for the default
+    /// abstraction into a table that `train --bucket-table` preloads.
+    BucketTable {
+        #[arg(long, default_value = "buckets.bin")]
+        out: String,
+        /// Postflop equity buckets per street.
+        #[arg(long, default_value_t = 12)]
+        buckets: u16,
+        #[arg(long, default_value_t = 200)]
+        rollouts: u32,
+        #[arg(long, default_value_t = 24)]
+        runouts: u32,
+        #[arg(long, default_value_t = 30_000)]
+        kmeans_samples: usize,
         #[arg(long)]
         threads: Option<usize>,
     },
@@ -474,6 +496,7 @@ fn main() {
         Cmd::Train {
             iters,
             out,
+            bucket_table,
             players,
             stack,
             resume,
@@ -556,7 +579,27 @@ fn main() {
                 }
                 None => {
                     let strat_ctx = strategic_from.as_ref().map(|p| load_strat_ctx(p));
-                    let centroids = if let Some(sc) = &strat_ctx {
+                    let table = bucket_table.as_ref().map(|path| {
+                        let t = abstraction::BucketTable::load(path)
+                            .unwrap_or_else(|e| die(&format!("cannot load bucket table '{path}': {e}")));
+                        if !t.matches(&abs_cfg) {
+                            die(&format!(
+                                "bucket table '{path}' was built for {} buckets / {} rollouts / {} runouts x {}; \
+                                 this run asks for {} / {} / {} x {}",
+                                t.cfg.postflop_buckets, t.cfg.equity_rollouts, t.cfg.dist_runouts,
+                                t.cfg.runout_rollouts, abs_cfg.postflop_buckets, abs_cfg.equity_rollouts,
+                                abs_cfg.dist_runouts, abs_cfg.runout_rollouts
+                            ));
+                        }
+                        if strat_ctx.is_some() || raw_buckets || ochs {
+                            die("--bucket-table only supports the default EMD k-means abstraction");
+                        }
+                        println!("loaded bucket table {path}: {} canonical flop/turn buckets", t.entries.len());
+                        t
+                    });
+                    let centroids = if let Some(t) = &table {
+                        t.centroids.clone()
+                    } else if let Some(sc) = &strat_ctx {
                         println!(
                             "training STRATEGIC centroids from previous blueprint \
                              ({buckets} buckets, {kmeans_samples} samples/street)..."
@@ -587,6 +630,9 @@ fn main() {
                         Some(c)
                     };
                     let mut abs = Abstraction::with_centroids(abs_cfg, centroids);
+                    if let Some(t) = &table {
+                        abs.prefill_canon(&t.entries);
+                    }
                     if let Some(sc) = strat_ctx {
                         abs = abs.with_strat(sc);
                     }
@@ -657,6 +703,50 @@ fn main() {
             println!(
                 "blueprint saved to {out} ({} strategies)",
                 bp.strategies.len()
+            );
+        }
+
+        Cmd::BucketTable {
+            out,
+            buckets,
+            rollouts,
+            runouts,
+            kmeans_samples,
+            threads,
+        } => {
+            if let Some(t) = threads {
+                rayon::ThreadPoolBuilder::new().num_threads(t).build_global().ok();
+            }
+            let abs_cfg = AbsConfig {
+                postflop_buckets: buckets,
+                equity_rollouts: rollouts,
+                dist_runouts: runouts,
+                cache_cap: 40_000_000, // both caches must hold every canonical pair
+                ..AbsConfig::default()
+            };
+            println!("training EMD k-means centroids ({buckets} buckets, {kmeans_samples} samples/street)...");
+            let t0 = std::time::Instant::now();
+            let centroids = Centroids::train(&abs_cfg, kmeans_samples, 0xC1A5);
+            println!("centroids trained in {:.1}s", t0.elapsed().as_secs_f64());
+            let abs = Abstraction::with_centroids(abs_cfg.clone(), Some(centroids.clone()));
+            let t0 = std::time::Instant::now();
+            let n = abs.build_bucket_table(&|street, done| {
+                eprintln!(
+                    "  {} buckets: {done} done, {:.0}s",
+                    if street == 3 { "flop" } else { "turn" },
+                    t0.elapsed().as_secs_f64()
+                );
+            });
+            let table = abstraction::BucketTable {
+                cfg: abs_cfg,
+                centroids: Some(centroids),
+                entries: abs.canon_entries(),
+            };
+            table.save(&out).unwrap_or_else(|e| die(&format!("cannot write {out}: {e}")));
+            println!(
+                "bucket table: {n} canonical pairs, {} entries, built in {:.0}s -> {out}",
+                table.entries.len(),
+                t0.elapsed().as_secs_f64()
             );
         }
 

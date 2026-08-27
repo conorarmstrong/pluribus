@@ -371,6 +371,78 @@ impl Abstraction {
         }
     }
 
+    /// Precompute the flop and turn bucket of every suit-canonical (hole,
+    /// board) pair (~1.8M flop, ~16M turn) into the canonical cache, in
+    /// parallel. Bucket values are exactly those the lazy path would
+    /// compute (Monte Carlo draws are seeded from the canonical key), so
+    /// a preloaded table changes nothing but speed: the trainer spends
+    /// ~70% of its time on these cache misses otherwise. Returns the
+    /// number of entries computed.
+    pub fn build_bucket_table(&self, progress: &(dyn Fn(usize, usize) + Sync)) -> usize {
+        let holes = crate::search::all_combos();
+        let mut total = 0;
+        for street_len in [3usize, 4] {
+            // Representatives: pairs whose identity-permutation key is
+            // already the canonical (minimal) key.
+            let reps: Vec<([Card; 2], Vec<Card>)> = holes
+                .par_iter()
+                .flat_map_iter(|&hole| {
+                    let mut out = Vec::new();
+                    let rest: Vec<Card> = (0..52u8).filter(|&c| c != hole[0] && c != hole[1]).collect();
+                    let mut idx = vec![0usize; street_len];
+                    for (i, v) in idx.iter_mut().enumerate() {
+                        *v = i;
+                    }
+                    loop {
+                        let board: Vec<Card> = idx.iter().map(|&i| rest[i]).collect();
+                        if identity_key(hole, &board) == canonical_cards_key(hole, &board) {
+                            out.push((hole, board));
+                        }
+                        // next combination
+                        let mut k = street_len;
+                        loop {
+                            if k == 0 {
+                                return out;
+                            }
+                            k -= 1;
+                            if idx[k] < rest.len() - (street_len - k) {
+                                idx[k] += 1;
+                                for j in k + 1..street_len {
+                                    idx[j] = idx[j - 1] + 1;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                })
+                .collect();
+            let done = std::sync::atomic::AtomicUsize::new(0);
+            let n = reps.len();
+            reps.par_iter().for_each(|(hole, board)| {
+                let mut rng = SmallRng::seed_from_u64(0);
+                self.bucket(*hole, board, &mut rng);
+                let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if d % 100_000 == 0 || d == n {
+                    progress(street_len, d);
+                }
+            });
+            total += n;
+        }
+        total
+    }
+
+    /// The canonical bucket cache as (key, bucket) pairs, for saving.
+    pub fn canon_entries(&self) -> Vec<(u64, u16)> {
+        self.canon.iter().map(|e| (*e.key(), *e.value())).collect()
+    }
+
+    /// Preload the canonical bucket cache (from `canon_entries`).
+    pub fn prefill_canon(&self, entries: &[(u64, u16)]) {
+        for &(k, b) in entries {
+            self.canon.insert(k, b);
+        }
+    }
+
     /// Attach the previous-round blueprint context needed to evaluate
     /// strategic fingerprints at cache misses.
     pub fn with_strat(mut self, sc: StratCtx) -> Self {
@@ -666,6 +738,52 @@ pub(crate) fn canonical_cards_key(hole: [Card; 2], board: &[Card]) -> u64 {
         best = best.min(key);
     }
     best
+}
+
+/// `canonical_cards_key`'s packing under the identity suit permutation
+/// (equal to the canonical key exactly when the pair is its own
+/// representative).
+fn identity_key(hole: [Card; 2], board: &[Card]) -> u64 {
+    let mut b = [0u8; 5];
+    b[..board.len()].copy_from_slice(board);
+    let b = &mut b[..board.len()];
+    b.sort_unstable();
+    let mut key = board.len() as u64;
+    key = (key << 6) | hole[0].min(hole[1]) as u64;
+    key = (key << 6) | hole[0].max(hole[1]) as u64;
+    for &c in b.iter() {
+        key = (key << 6) | c as u64;
+    }
+    key
+}
+
+/// On-disk bucket table: the abstraction it was built for, its centroids,
+/// and every canonical flop/turn bucket.
+#[derive(Serialize, Deserialize)]
+pub struct BucketTable {
+    pub cfg: AbsConfig,
+    pub centroids: Option<Centroids>,
+    pub entries: Vec<(u64, u16)>,
+}
+
+impl BucketTable {
+    pub fn save(&self, path: &str) -> std::io::Result<()> {
+        let f = std::io::BufWriter::new(std::fs::File::create(path)?);
+        bincode::serialize_into(f, self).map_err(std::io::Error::other)
+    }
+
+    pub fn load(path: &str) -> std::io::Result<BucketTable> {
+        let f = std::io::BufReader::new(std::fs::File::open(path)?);
+        bincode::deserialize_from(f).map_err(std::io::Error::other)
+    }
+
+    /// The card-abstraction parameters that determine bucket values.
+    pub fn matches(&self, cfg: &AbsConfig) -> bool {
+        self.cfg.postflop_buckets == cfg.postflop_buckets
+            && self.cfg.equity_rollouts == cfg.equity_rollouts
+            && self.cfg.dist_runouts == cfg.dist_runouts
+            && self.cfg.runout_rollouts == cfg.runout_rollouts
+    }
 }
 
 /// Exact cache key: up to 7 cards, sorted, 6 bits each, plus board length.
@@ -1557,6 +1675,42 @@ mod tests {
 
     /// Suit-isomorphic (hole, board) pairs must land in the same river
     /// bucket through the per-board canonical table.
+    /// A preloaded canonical table must reproduce the lazily computed
+    /// bucket exactly, and representatives are exactly the pairs whose
+    /// identity key is canonical.
+    #[test]
+    fn bucket_table_roundtrip_matches_lazy_buckets() {
+        let cfg = AbsConfig {
+            equity_rollouts: 20,
+            dist_runouts: 6,
+            runout_rollouts: 10,
+            cache_cap: 1000,
+            ..AbsConfig::default()
+        };
+        let a = Abstraction::new(cfg.clone());
+        let mut rng = SmallRng::seed_from_u64(1);
+        let hole = [make_card(12, 0), make_card(11, 0)];
+        let flop = [make_card(9, 1), make_card(3, 2), make_card(7, 0)];
+        let lazy = a.bucket(hole, &flop, &mut rng);
+        let entries = a.canon_entries();
+        assert_eq!(entries.len(), 1);
+        let b = Abstraction::new(cfg);
+        b.prefill_canon(&entries);
+        // Same bucket for a suit-isomorphic variant, served from the table.
+        let iso_hole = [make_card(12, 3), make_card(11, 3)];
+        let iso_flop = [make_card(9, 2), make_card(3, 1), make_card(7, 3)];
+        assert_eq!(b.bucket(iso_hole, &iso_flop, &mut rng), lazy);
+        assert_eq!(b.canon_entries().len(), 1, "no new canonical entry was computed");
+        // Representative test: canonical iff identity key is minimal.
+        assert_eq!(
+            identity_key(hole, &flop) == canonical_cards_key(hole, &flop),
+            canonical_cards_key(hole, &flop) == identity_key(hole, &flop)
+        );
+        let table = BucketTable { cfg: a.cfg.clone(), centroids: None, entries };
+        assert!(table.matches(&a.cfg));
+        assert!(!table.matches(&AbsConfig { postflop_buckets: 13, ..a.cfg.clone() }));
+    }
+
     #[test]
     fn river_buckets_are_suit_isomorphic() {
         let abs = Abstraction::new(AbsConfig {
