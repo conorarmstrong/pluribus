@@ -138,6 +138,12 @@ enum Cmd {
         /// instead of the linear running average; preflop keeps the average.
         #[arg(long)]
         snapshot_avg: bool,
+        /// Multiway-focused sampling weight f in [0,1): opponents' preflop
+        /// actions are drawn from (1-f)*strategy + f*uniform-over-non-fold,
+        /// importance-weighted so the equilibrium is unchanged; multiway
+        /// lines get trained more per iteration. 0 = off.
+        #[arg(long, default_value_t = 0.0)]
+        multiway_focus: f64,
         /// Worker threads (default: all cores).
         #[arg(long)]
         threads: Option<usize>,
@@ -487,6 +493,7 @@ fn main() {
             vr_baseline,
             per_action_prune,
             snapshot_avg,
+            multiway_focus,
             threads,
         } => {
             if let Some(t) = threads {
@@ -512,6 +519,7 @@ fn main() {
                 seed: train_seed,
                 pluribus_prune: !per_action_prune,
                 snapshot_avg,
+                multiway_focus,
                 ..TrainConfig::default()
             };
             let trainer = match &resume {
@@ -592,7 +600,7 @@ fn main() {
 
             println!(
                 "training {players}-max, {iters} iterations, menu {menu:?}, pruning {}, \
-                 vr baselines {}, snapshot avg {}",
+                 vr baselines {}, snapshot avg {}, multiway focus {multiway_focus}",
                 if no_prune { "off" } else if per_action_prune { "per-action" } else { "pluribus" },
                 if vr_baseline { "on" } else { "off" },
                 if snapshot_avg { "on" } else { "off" }

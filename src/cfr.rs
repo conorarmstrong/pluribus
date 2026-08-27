@@ -59,6 +59,12 @@ pub struct TrainConfig {
     /// the current strategy has already zeroed actions the average still
     /// carries residual mass on.
     pub snapshot_avg: bool,
+    /// Multiway-focused sampling: at a non-traverser's preflop node the
+    /// action is drawn from (1-f)*sigma + f*uniform-over-non-fold and the
+    /// traversal's weight is multiplied by sigma/q, so multiway lines are
+    /// reached more often while every update stays unbiased (the
+    /// fixed point is unchanged). 0 = plain external sampling.
+    pub multiway_focus: f64,
 }
 
 impl Default for TrainConfig {
@@ -71,6 +77,7 @@ impl Default for TrainConfig {
             seed: 0,
             pluribus_prune: true,
             snapshot_avg: false,
+            multiway_focus: 0.0,
         }
     }
 }
@@ -572,6 +579,23 @@ impl Trainer {
                         sample_index(&dist, rng)
                     };
                     let q = (1.0 - SPINE_EPS) * dist[idx] + if idx == si { SPINE_EPS } else { 0.0 };
+                    (idx, weight * dist[idx] / q)
+                }
+                _ if self.cfg.multiway_focus > 0.0 && h.street() == Street::Preflop => {
+                    // Multiway focus: mix toward non-fold actions,
+                    // importance-weighted (see TrainConfig::multiway_focus).
+                    let f = self.cfg.multiway_focus;
+                    let live: Vec<usize> = (0..acts.len())
+                        .filter(|&i| acts[i] != AbsAction::Fold)
+                        .collect();
+                    let u = 1.0 / live.len() as f64;
+                    let idx = if rng.random::<f64>() < f {
+                        live[rng.random_range(0..live.len())]
+                    } else {
+                        sample_index(&dist, rng)
+                    };
+                    let q = (1.0 - f) * dist[idx]
+                        + if acts[idx] != AbsAction::Fold { f * u } else { 0.0 };
                     (idx, weight * dist[idx] / q)
                 }
                 _ => (sample_index(&dist, rng), weight),
@@ -1231,6 +1255,27 @@ mod tests {
         assert!(aa_call[1] > 0.8, "AA should call a shove, got {:.3}", aa_call[1]);
         let btn_aa = t.avg_strategy(aa, &[]).expect("root AA visited");
         assert!(btn_aa[0] < 0.1, "button must not fold AA, got {:.3}", btn_aa[0]);
+    }
+
+    /// Multiway-focused sampling is importance-weighted, so it must keep
+    /// the push/fold fixed point (AA calls a shove, the button never
+    /// folds AA) even at a strong focus weight.
+    #[test]
+    fn multiway_focus_keeps_the_fixed_point() {
+        let mut t = push_fold_trainer();
+        t.cfg.multiway_focus = 0.6;
+        t.run(60_000, &|_| {});
+        let aa = preflop_bucket([make_card(12, 0), make_card(12, 1)]);
+        let shove_hist = [AbsAction::AllIn.token()];
+        let aa_call = t.avg_strategy(aa, &shove_hist).expect("AA-vs-shove visited");
+        assert!(aa_call[1] > 0.8, "AA should call a shove, got {:.3}", aa_call[1]);
+        let btn_aa = t.avg_strategy(aa, &[]).expect("root AA visited");
+        assert!(btn_aa[0] < 0.1, "button must not fold AA, got {:.3}", btn_aa[0]);
+        // Junk must still fold to a shove: the focus changes which lines
+        // are sampled, not what is learned on them.
+        let junk = preflop_bucket([make_card(0, 0), make_card(5, 1)]);
+        let junk_call = t.avg_strategy(junk, &shove_hist).expect("junk-vs-shove visited");
+        assert!(junk_call[1] < 0.2, "72o must fold to a shove, got {:.3}", junk_call[1]);
     }
 
     /// Snapshot averaging: postflop strategies come only from snapshots
