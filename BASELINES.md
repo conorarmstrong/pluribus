@@ -1221,3 +1221,24 @@ abstraction is the suspect. Probe-variation note: re-probing the same
 500M blueprint gave +678/+702 (seed 1) and +492/+595 (seed 2), so
 parallel multiway probes vary more than the 1-3% measured on the 200M
 blueprint; 8-seed paired means remain the unit of evidence.
+
+### 50 card buckets at 500M (28 Aug 2026)
+
+`bucket-table --buckets 50` (194 s) then `train --iters 500000000
+--buckets 50 --bucket-table buckets50.bin`: 71 min, **243M infosets**
+(12 buckets: 150M). Paired probes vs the 12-bucket 500M blueprint,
+seeds 1-8, 20k hands.
+
+| Probe | 12 buckets | 50 buckets | paired 50 − 12 |
+|-------|-----------:|-----------:|---------------:|
+| multiway LBR | +649.0 | +796.9 | **+147.8 ±120.5** (t=2.9), worse 6/8 |
+| heads-up BR | +271.0 | +175.8 | **−95.1 ±99.5** (t=2.3), better 6/8 |
+
+Per seed 50-bucket multiway: +935 +846 +811 +784 +972 +804 +601 +622;
+heads-up: +222 +35 +218 +231 +97 +159 +157 +287.
+
+VERDICT: the finer abstraction reverses the heads-up drift (supporting
+the abstraction-pathology reading of the 2B curve) but at equal
+iterations its 1.6x larger tree is under-trained multiway. Not adopted
+at 500M. Next: 50 buckets at 2B with a 1B checkpoint, where the
+12-bucket run had already plateaued.
