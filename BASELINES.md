@@ -1190,3 +1190,34 @@ grow ~t^2, the fixed prune threshold −3e8 becomes over-aggressive late);
 Pluribus stopped linear weighting after 400 minutes. Next arm: a cap
 on the linear weight, paired at 500M. Blueprints kept in the scratchpad
 (a4_bp_{500M,1B,2B}.bin; 500M = 5.0 GB) pending that result.
+
+### Linear-weight cap at 500M — NEGATIVE (28 Aug 2026)
+
+`train --iters 500000000 --linear-cap 100000000 --bucket-table buckets.bin`
+vs the uncapped 500M blueprint above, paired `lbr --multiway` and `br`
+at 20k hands, seeds 1-8.
+
+| Probe | uncapped mean | cap 100M mean | paired cap − uncapped |
+|-------|--------------:|--------------:|----------------------:|
+| multiway LBR | +649.0 | +730.5 | **+81.4 ±96.4** (t=2.0), worse 6/8 |
+| heads-up BR | +271.0 | +336.2 | +65.2 ±128.1 (t=1.2), worse 5/8 |
+
+Per seed uncapped multiway: +702 +595 +592 +636 +680 +613 +686 +688;
+capped: +635 +674 +777 +688 +910 +820 +701 +639. Uncapped heads-up:
++230 +181 +431 +270 +214 +455 +123 +263; capped: +304 +290 +326 +214
++72 +740 +273 +471.
+
+VERDICT: closed; the linear weight is not the cause of the late
+heads-up drift. Also recorded: the uncapped 500M blueprint on all 8
+seeds vs the standing 200M `blueprint_plu200.bin`: multiway **+649 vs
++1086** (better on 8/8, −40%), heads-up **+271 vs +116** (worse on 8/8:
++230/+39, +181/+40, +431/+132, +270/+174, +214/+80, +455/+247,
++123/+99, +263/+120). It fails the "worsens neither" rule, so it is
+NOT adopted; it is kept as `a4_bp_500000000.bin` (scratchpad). The
+pattern (heads-up converged by 100M in the abstract game, real-game
+exploitability rising afterwards while multiway still improves) is the
+abstraction-pathology signature (Waugh et al. 2009): the 12-bucket card
+abstraction is the suspect. Probe-variation note: re-probing the same
+500M blueprint gave +678/+702 (seed 1) and +492/+595 (seed 2), so
+parallel multiway probes vary more than the 1-3% measured on the 200M
+blueprint; 8-seed paired means remain the unit of evidence.
