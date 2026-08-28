@@ -1166,3 +1166,27 @@ iters/s (no change). `bucket-table` (15,246,842 canonical flop/turn
 pairs, 173 s to build, 152 MB) preloaded via `train --bucket-table`:
 **248,660 iters/s vs 92,630** on 10M iterations, same machine load
 (2.7x). Bucket values identical to the lazy path by construction.
+
+### A4 local: 2B iterations on this machine (28 Aug 2026)
+
+One run (`--train-seed 0 --bucket-table buckets.bin`, defaults),
+checkpointed and probed at 500M/1B/2B; `lbr --multiway --hands 20000`
+seeds 1-2, `br --hands 20000` seed 1. Continues the A3b curve.
+
+| Iterations | infosets | train time | multiway s1 | s2 | mean | heads-up s1 |
+|-----------:|---------:|-----------:|------------:|---:|-----:|------------:|
+| 200M (A3b) | 121M | 37 min | +1003.8 | +854.8 | +929 | +48.3 |
+| 500M | 150M | 64 min | +677.7 | +492.0 | +585 | +239.3 |
+| 1B | 177M | +86 min | +490.7 | +788.1 | +639 | +372.5 |
+| 2B | 209M | +170 min | +634.5 | +673.2 | +654 | +392.4 |
+
+Rate fell from 248k iters/s (10M) to ~100k (map at 150-210M infosets,
+36-45 GB RSS): memory-bound. VERDICT: the multiway bound drops 37% from
+200M to 500M then plateaus at ~+600-650; the heads-up line drifts WORSE
+from +48 (200M) to +392 (2B), outside its ±260 CI. Under the current
+recipe more iterations stop paying at ~500M and start costing heads-up.
+Suspected cause: Linear CFR weights applied for the whole run (regrets
+grow ~t^2, the fixed prune threshold −3e8 becomes over-aggressive late);
+Pluribus stopped linear weighting after 400 minutes. Next arm: a cap
+on the linear weight, paired at 500M. Blueprints kept in the scratchpad
+(a4_bp_{500M,1B,2B}.bin; 500M = 5.0 GB) pending that result.
