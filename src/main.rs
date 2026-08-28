@@ -130,7 +130,7 @@ enum Cmd {
         /// Regret below which an action may be pruned (chips, linearly
         /// weighted). Absolute, so a long run reaches it for almost every
         /// negative-regret action; scale it with the run length.
-        #[arg(long, default_value_t = -3.0e8)]
+        #[arg(long, default_value_t = -3.0e8, allow_negative_numbers = true)]
         prune_threshold: f64,
         /// VR-MCCFR: learned control-variate baselines at sampled opponent
         /// nodes (Schmid et al. 2019). Unbiased; cuts the variance of every
