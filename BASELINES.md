@@ -1242,3 +1242,23 @@ the abstraction-pathology reading of the 2B curve) but at equal
 iterations its 1.6x larger tree is under-trained multiway. Not adopted
 at 500M. Next: 50 buckets at 2B with a 1B checkpoint, where the
 12-bucket run had already plateaued.
+
+### 50 card buckets at 1B (28 Aug 2026)
+
+Same run continued to 1B (`--resume`, 8-seed probes; blueprint
+`runs/b50_bp_1B.bin`, 10.1 GB).
+
+| Probe | standing plu200 | 12 buckets @500M | 50 buckets @1B |
+|-------|----------------:|-----------------:|---------------:|
+| multiway LBR | +1086.3 | +649.0 | **+631.0** (vs standing −455 ±255, 8/8; vs 12b@500M −18 ±108) |
+| heads-up BR | +116.4 | +270.9 | **+232.8** (vs standing +116 ±78, worse 7/8; vs 12b@500M −38 ±104) |
+
+Per seed multiway: +554 +836 +441 +548 +636 +658 +645 +731; heads-up:
++228 +153 +285 +372 +139 +183 +170 +334.
+
+VERDICT: 50 buckets at 1B reproduces 12 buckets at 500M on both probes
+at twice the cost; the heads-up drift is not an abstraction effect.
+Remaining suspect: the absolute pruning threshold (−3e8) against
+linearly weighted regrets, which past ~300M iterations prunes almost
+every negative-regret action 95% of the time. Test: `--prune-threshold`
+scaled with the run length.
