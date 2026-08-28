@@ -150,6 +150,11 @@ enum Cmd {
         /// per iteration. 0 = off.
         #[arg(long, default_value_t = 0.0)]
         multiway_focus: f64,
+        /// Cap on the Linear CFR iteration weight (weight = min(t, cap));
+        /// Pluribus stopped linear weighting after 400 minutes. Default:
+        /// uncapped.
+        #[arg(long, default_value_t = u64::MAX)]
+        linear_cap: u64,
         /// Worker threads (default: all cores).
         #[arg(long)]
         threads: Option<usize>,
@@ -518,6 +523,7 @@ fn main() {
             per_action_prune,
             snapshot_avg,
             multiway_focus,
+            linear_cap,
             threads,
         } => {
             if let Some(t) = threads {
@@ -544,6 +550,7 @@ fn main() {
                 pluribus_prune: !per_action_prune,
                 snapshot_avg,
                 multiway_focus,
+                linear_cap,
                 ..TrainConfig::default()
             };
             let trainer = match &resume {

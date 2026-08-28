@@ -65,6 +65,11 @@ pub struct TrainConfig {
     /// sigma/q, so multiway lines are reached more often while the
     /// fixed point is unchanged. 0 = plain external sampling.
     pub multiway_focus: f64,
+    /// Linear CFR weight cap: the iteration weight is min(t, cap).
+    /// Pluribus applied linear weighting only for the first 400 minutes;
+    /// with an uncapped weight regrets grow ~t^2 over a long run and the
+    /// fixed pruning threshold turns over-aggressive. u64::MAX = uncapped.
+    pub linear_cap: u64,
 }
 
 impl Default for TrainConfig {
@@ -78,6 +83,7 @@ impl Default for TrainConfig {
             pluribus_prune: true,
             snapshot_avg: false,
             multiway_focus: 0.0,
+            linear_cap: u64::MAX,
         }
     }
 }
@@ -364,7 +370,7 @@ impl Trainer {
                 if hand.is_terminal() {
                     continue; // degenerate deal (e.g. blinds all-in, tiny stacks)
                 }
-                let weight = t as f64;
+                let weight = t.min(self.cfg.linear_cap) as f64;
                 // Pluribus mode decides pruning once per traversal; the
                 // per-action mode keeps prune_ok on and rolls per action.
                 let prune_ok = t > self.cfg.prune_after
